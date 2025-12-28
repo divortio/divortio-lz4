@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LZ4 Fetch Stream Download</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; line-height: 1.6; }
+        .container { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #f9f9f9; }
+        h1 { border-bottom: 2px solid #ddd; padding-bottom: 10px; }
+        #output {
+            margin-top: 20px; padding: 10px; border: 1px solid #999;
+            background: #fff; height: 300px; overflow-y: scroll; white-space: pre-wrap; font-family: monospace;
+        }
+        button { padding: 10px 20px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <a href="/" style="text-decoration: none; font-size: 0.9em;">&larr; Back to Examples</a>
+    <h1>Fetch & Decompress Stream</h1>
+    <p>
+        Click below to fetch a stream from the server. The server generates data and compresses it on the fly.
+        This page downloads the stream and decompresses it instantly, displaying the text below.
+    </p>
+
+    <button id="downloadBtn">Start Streaming Download</button>
+
+    <div id="output">Waiting for stream...</div>
+</div>
+
+<script type="module">
+    // Import the named export 'LZ4' from the virtual /src path
+    import { LZ4 } from '/src/lz4.js';
+
+    const outputDiv = document.getElementById('output');
+    const btn = document.getElementById('downloadBtn');
+
+    btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        outputDiv.textContent = '';
+
+        try {
+            // 1. Fetch the compressed file/stream
+            const response = await fetch('/sample.lz4');
+            if (!response.body) throw new Error("ReadableStream not supported in this browser.");
+
+            // 2. Pipe the fetch body through the LZ4 Decoder
+            // Updated method call: LZ4.decompressStream()
+            const decompressedStream = response.body.pipeThrough(LZ4.decompressStream());
+
+            // 3. Read the stream and decode text
+            const reader = decompressedStream.getReader();
+            const textDecoder = new TextDecoder();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                // Convert Uint8Array to string and append to UI
+                const chunk = textDecoder.decode(value, { stream: true });
+                outputDiv.textContent += chunk;
+
+                // Auto-scroll to bottom
+                outputDiv.scrollTop = outputDiv.scrollHeight;
+            }
+
+            outputDiv.textContent += '\n[STREAM COMPLETE]';
+
+        } catch (err) {
+            console.error(err);
+            outputDiv.textContent += `\n[ERROR] ${err.message}`;
+        } finally {
+            btn.disabled = false;
+        }
+    });
+</script>
+</body>
+</html>

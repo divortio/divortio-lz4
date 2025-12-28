@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LZ4 + OPFS (Origin Private File System)</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; line-height: 1.6; }
+        .container { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #f9f9f9; }
+        .box { border: 1px solid #ddd; padding: 15px; border-radius: 4px; margin-top: 20px; background: #fff; }
+        h1 { border-bottom: 2px solid #ddd; padding-bottom: 10px; margin-top: 0; }
+        h3 { margin-top: 0; }
+
+        button { cursor: pointer; padding: 10px 20px; background: #28a745; color: white; border: none; border-radius: 4px; font-size: 16px; margin-right: 10px; }
+        button.secondary { background: #007bff; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+
+        pre { background: #333; color: #fff; padding: 10px; border-radius: 4px; overflow-x: auto; margin-top: 20px; height: 200px; font-family: monospace; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <a href="/" style="text-decoration: none; font-size: 0.9em;">&larr; Back to Examples</a>
+    <h1>LZ4 + OPFS Stream</h1>
+    <p>
+        Demonstrates streaming compression directly to the <strong>Origin Private File System</strong>.
+        Unlike <code>localStorage</code>, this allows storing gigabytes of data without blocking the main thread
+        or hitting string-length limits.
+    </p>
+
+    <div class="box">
+        <h3>1. Generate & Compress</h3>
+        <p>Create 50MB of dummy data and stream it compressed directly to <code>/root/test-data.LZ4</code>.</p>
+        <button id="btnWrite">Generate & Save to OPFS</button>
+        <div id="writeStatus"></div>
+    </div>
+
+    <div class="box">
+        <h3>2. Read & Verify & Cleanup</h3>
+        <p>Stream <code>/root/test-data.LZ4</code> from OPFS, decompress on the fly, verify size, and <strong>auto-delete</strong>.</p>
+        <button id="btnRead" class="secondary" disabled>Load & Verify</button>
+        <div id="readStatus"></div>
+    </div>
+
+    <h3>Logs</h3>
+    <pre id="logs">Waiting for action...</pre>
+</div>
+
+<script type="module">
+    import { LZ4 } from '/src/lz4.js';
+
+    const logElem = document.getElementById('logs');
+    const btnWrite = document.getElementById('btnWrite');
+    const btnRead = document.getElementById('btnRead');
+
+    function log(msg) {
+        logElem.textContent += '\n' + msg;
+        logElem.scrollTop = logElem.scrollHeight;
+        console.log(msg);
+    }
+
+    /** * Helper: Generates a ReadableStream of random text data.
+     * Simulates downloading a large file or generating a report.
+     */
+    function createRandomDataStream(totalMB) {
+        const chunkSize = 1024 * 1024; // 1MB chunks
+        let sent = 0;
+        const total = totalMB * 1024 * 1024;
+        const encoder = new TextEncoder();
+
+        return new ReadableStream({
+            pull(controller) {
+                if (sent >= total) {
+                    controller.close();
+                    return;
+                }
+                const str = "A".repeat(chunkSize); // Dummy content
+                const buf = encoder.encode(str);
+                sent += buf.byteLength;
+                controller.enqueue(buf);
+            }
+        });
+    }
+
+    // --- STEP 1: Write to OPFS (Compress Stream) ---
+    btnWrite.addEventListener('click', async () => {
+        try {
+            btnWrite.disabled = true;
+            log("--- Starting Write Operation ---");
+
+            // 1. Get Access to OPFS Root
+            const root = await navigator.storage.getDirectory();
+
+            // 2. Create/Open File Handle
+            const fileHandle = await root.getFileHandle('test-data.LZ4', { create: true });
+            log(`Opened file handle: test-data.LZ4`);
+
+            // 3. Create Writable Stream to Disk
+            const writable = await fileHandle.createWritable();
+
+            // 4. Create Source Data (50MB Stream)
+            const sourceStream = createRandomDataStream(50); // 50MB
+
+            // 5. Build Pipeline: Source -> Compress -> Disk
+            log("Streaming 50MB of data through LZ4 Compressor...");
+            const startTime = performance.now();
+
+            await sourceStream
+                .pipeThrough(LZ4.compressStream())
+                .pipeTo(writable);
+
+            const duration = (performance.now() - startTime).toFixed(0);
+
+            // Check final size
+            const file = await fileHandle.getFile();
+            log(`✅ Write Complete in ${duration}ms`);
+            log(`Original Size: 50.00 MB`);
+            log(`Compressed On-Disk: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
+
+            btnRead.disabled = false;
+            btnWrite.disabled = false;
+        } catch (err) {
+            log(`❌ Error: ${err.message}`);
+            console.error(err);
+            btnWrite.disabled = false;
+        }
+    });
+
+    // --- STEP 2: Read from OPFS (Decompress Stream) & Cleanup ---
+    btnRead.addEventListener('click', async () => {
+        try {
+            btnRead.disabled = true;
+            log("\n--- Starting Read Operation ---");
+
+            // 1. Get File
+            const root = await navigator.storage.getDirectory();
+            const fileHandle = await root.getFileHandle('test-data.LZ4');
+            const file = await fileHandle.getFile();
+            log(`Reading ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)...`);
+
+            // 2. Get Readable Stream from File
+            const readStream = file.stream();
+
+            // 3. Build Pipeline: Disk -> Decompress -> Count Bytes
+            const startTime = performance.now();
+
+            const decompressedStream = readStream.pipeThrough(LZ4.decompressStream());
+            const reader = decompressedStream.getReader();
+
+            let totalBytes = 0;
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                totalBytes += value.byteLength;
+            }
+
+            const duration = (performance.now() - startTime).toFixed(0);
+
+            log(`✅ Read & Decompress Complete in ${duration}ms`);
+            log(`Restored Size: ${(totalBytes / 1024 / 1024).toFixed(2)} MB`);
+
+            if (totalBytes === 50 * 1024 * 1024) {
+                log("SUCCESS: Byte count matches exactly.");
+            } else {
+                log("WARNING: Byte count mismatch.");
+            }
+
+            // --- CLEANUP ---
+            log("🧹 Cleaning up OPFS...");
+            await root.removeEntry('test-data.LZ4');
+            log("✅ Deleted /root/test-data.LZ4");
+
+            btnRead.disabled = true; // Cannot read again
+        } catch (err) {
+            log(`❌ Error: ${err.message}`);
+            console.error(err);
+            btnRead.disabled = false;
+        }
+    });
+</script>
+</body>
+</html>

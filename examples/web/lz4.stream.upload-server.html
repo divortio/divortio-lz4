@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LZ4 Stream Upload Example</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; line-height: 1.6; }
+        .container { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #f9f9f9; }
+        h1 { border-bottom: 2px solid #ddd; padding-bottom: 10px; }
+        #status { margin-top: 20px; padding: 10px; border-radius: 4px; }
+        .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .warning { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+        .processing { background-color: #cce5ff; color: #004085; border: 1px solid #b8daff; }
+        code { background: #eee; padding: 2px 5px; border-radius: 3px; }
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; margin-top: 10px; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <a href="/" style="text-decoration: none; font-size: 0.9em;">&larr; Back to Examples</a>
+    <h1>LZ4 Stream Upload</h1>
+    <p>
+        Select a file to compress and upload.
+        It attempts a <strong>Stream Upload</strong> first. If the browser/network rejects it, it falls back to a standard <strong>Buffered Upload</strong>.
+    </p>
+
+    <input type="file" id="fileInput" />
+    <br>
+    <button id="uploadBtn" disabled>Compress & Upload</button>
+
+    <div id="status"></div>
+</div>
+
+<script type="module">
+    import { LZ4 } from '/src/lz4.js';
+
+    const fileInput = document.getElementById('fileInput');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const statusDiv = document.getElementById('status');
+
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files.length > 0) {
+            uploadBtn.disabled = false;
+            statusDiv.className = '';
+            statusDiv.textContent = '';
+        } else {
+            uploadBtn.disabled = true;
+        }
+    });
+
+    uploadBtn.addEventListener('click', async () => {
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        uploadBtn.disabled = true;
+        setStatus('Attempting Stream Upload...', 'processing');
+
+        try {
+            // --- ATTEMPT 1: STREAM UPLOAD ---
+            await uploadAsStream(file);
+
+        } catch (streamErr) {
+            console.warn("Stream upload failed, falling back to buffered upload:", streamErr);
+            setStatus(`Stream upload failed (${streamErr.message}). Falling back to Buffered Upload...`, 'warning');
+
+            // --- ATTEMPT 2: BUFFERED FALLBACK ---
+            try {
+                await uploadAsBuffer(file);
+            } catch (bufErr) {
+                console.error(bufErr);
+                setStatus(`Error: All upload methods failed. ${bufErr.message}`, 'error');
+            }
+        } finally {
+            uploadBtn.disabled = false;
+        }
+    });
+
+    // METHOD A: High Performance Streaming
+    async function uploadAsStream(file) {
+        const fileStream = file.stream();
+        const compressedStream = fileStream.pipeThrough(LZ4.compressStream());
+
+        const response = await fetch('/upload', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                'X-Original-Name': file.name,
+                'X-Upload-Type': 'stream'
+            },
+            body: compressedStream,
+            duplex: 'half' // Required for streaming, but can cause ALPN/HTTP1 issues
+        });
+
+        if (!response.ok) throw new Error(`Server ${response.status} ${response.statusText}`);
+        const text = await response.text();
+        setStatus(`Success (Stream): ${text}`, 'success');
+    }
+
+    // METHOD B: Reliable Buffered Upload (Fallback)
+    async function uploadAsBuffer(file) {
+        // 1. Read file to ArrayBuffer
+        const arrayBuffer = await file.arrayBuffer();
+        const inputBytes = new Uint8Array(arrayBuffer);
+
+        // 2. Compress Sync (or Async)
+        // Using Async here to keep UI responsive during fallback
+        const compressedBytes = await LZ4.compressAsync(inputBytes);
+
+        // 3. Upload Blob
+        const response = await fetch('/upload', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                'X-Original-Name': file.name,
+                'X-Upload-Type': 'buffered'
+            },
+            body: compressedBytes
+            // No 'duplex' needed for standard body
+        });
+
+        if (!response.ok) throw new Error(`Server ${response.status} ${response.statusText}`);
+        const text = await response.text();
+        setStatus(`Success (Buffered Fallback): ${text}`, 'success');
+    }
+
+    function setStatus(msg, type) {
+        statusDiv.textContent = msg;
+        statusDiv.className = type;
+    }
+</script>
+</body>
+</html>

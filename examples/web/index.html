@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LZ4 Web Examples</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 40px auto; line-height: 1.6; }
+        h1 { border-bottom: 2px solid #ddd; padding-bottom: 10px; }
+        .card { border: 1px solid #ccc; padding: 20px; margin-bottom: 20px; border-radius: 8px; background: #f9f9f9; }
+        .card h3 { margin-top: 0; }
+        a.btn {
+            display: inline-block; text-decoration: none; background: #007bff; color: white;
+            padding: 10px 15px; border-radius: 4px; margin-top: 10px;
+        }
+        a.btn:hover { background: #0056b3; }
+        code { background: #eee; padding: 2px 5px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+
+<h1>LZ4 Web Examples</h1>
+<p>Select a demo below to test the LZ4 JS implementation.</p>
+
+<div class="card">
+    <h3>1. Browser File Processing</h3>
+    <p>Select a local file, compress it in the browser using LZ4, and download the result. No server upload involved.</p>
+    <p><strong>File:</strong> <code>lz4.stream.browser-file.html</code></p>
+    <a href="/lz4.stream.browser-file.html" class="btn">Launch Demo</a>
+</div>
+
+<div class="card">
+    <h3>2. Stream Upload to Server</h3>
+    <p>Compress a file in the browser as a stream and upload it directly to this Node.js server.</p>
+    <p><strong>File:</strong> <code>lz4.stream.upload-server.html</code></p>
+    <a href="/lz4.stream.upload-server.html" class="btn">Launch Demo</a>
+</div>
+
+<div class="card">
+    <h3>3. OPFS Stream (Origin Private File System)</h3>
+    <p>Stream compression directly to the browser's persistent private storage (OPFS). Useful for large local datasets.</p>
+    <p><strong>File:</strong> <code>lz4.stream.opfs.html</code></p>
+    <a href="/lz4.stream.opfs.html" class="btn">Launch Demo</a>
+</div>
+
+<div class="card">
+    <h3>4. Fetch Stream Download</h3>
+    <p>Download a compressed stream from the server and decompress it on the fly.</p>
+    <p><strong>File:</strong> <code>lz4.stream.fetch-download.html</code></p>
+    <a href="/lz4.stream.fetch-download.html" class="btn">Launch Demo</a>
+</div>
+<div class="card">
+    <h3>5. Web Worker (Off-Main-Thread)</h3>
+    <p>Uses a background thread to compress/decompress large data without freezing the UI. Supports <code>SharedArrayBuffer</code> for zero-copy performance.</p>
+    <p><strong>File:</strong> <code>lz4.web-worker.html</code></p>
+    <a href="/lz4.web-worker.html" class="btn">Launch Demo</a>
+</div>
+
+</body>
+</html>
