@@ -2,7 +2,8 @@
   "name": "divortio-lz4",
   "version": "1.0.0",
   "type": "module",
+  "main": "src/lz4.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node runAll.test.mjs"
   }
 }
