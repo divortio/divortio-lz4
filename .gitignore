@@ -125,3 +125,4 @@ dist
 docs/LLM.prompt.00.md
 divortio-cryptoXOR.iml
 divortio-lz4.iml
+.DS_Store
