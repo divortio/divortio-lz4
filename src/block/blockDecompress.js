@@ -1,5 +1,6 @@
-import { LZ4Base, MIN_MATCH } from '../lz4.common.js';
-
+// import { LZ4Base, MIN_MATCH } from '../lz4.common.js';
+import {Lz4Base} from "../shared/lz4Base.js";
+import {MIN_MATCH} from "../shared/constants.js";
 /**
  * src/blockDecompress.js
  * LZ4 Block Decompression Kernel.
@@ -7,7 +8,7 @@ import { LZ4Base, MIN_MATCH } from '../lz4.common.js';
  */
 
 // Local alias for hot-path speed
-const readU16 = LZ4Base.readU16;
+const readU16 = Lz4Base.readU16;
 
 /**
  * Decompresses a raw LZ4 block.

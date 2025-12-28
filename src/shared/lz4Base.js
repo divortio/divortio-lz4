@@ -1,5 +1,18 @@
+/**
+ * @fileoverview Shared low-level utilities for LZ4 Frame processing.
+ *
+ * This module provides the foundational binary operations required by both
+ * compression and decompression, including:
+ * - Input normalization (Buffer casting).
+ * - Little-Endian integer reading/writing.
+ * - Frame Header generation.
+ * - Block Size ID resolution.
+ *
+ * These helpers are stateless and used across buffer, stream, and async implementations.
+ *
+ * @module shared/lz4Base
+ */
 
-// --- Shared Helpers ---
 import {xxHash32} from "../xxhash32/xxhash32.js";
 import {
     DEFAULT_BLOCK_ID, FLG_BLOCK_INDEP_MASK, FLG_CONTENT_CHECKSUM_MASK, LZ4_VERSION,
@@ -10,8 +23,23 @@ import {
     MAX_SIZE_64KB
 } from "./constants.js";
 
+/**
+ * Base utility class for LZ4 operations.
+ * Contains static helper methods for binary manipulation and header management.
+ * @namespace
+ */
 export class Lz4Base {
-    /** Normalizes input to Uint8Array. */
+
+    /**
+     * Normalizes various input types into a standard Uint8Array.
+     *
+     * This method acts as a "guard" to ensure all internal LZ4 logic operates
+     * strictly on binary buffers. It handles views, buffers, strings, and objects.
+     *
+     * @param {Uint8Array|ArrayBuffer|ArrayBufferView|string|Object} input - The raw input data.
+     * @returns {Uint8Array} A Uint8Array view of the input data.
+     * @throws {Error} If the input type is unsupported or if JSON serialization fails.
+     */
     static ensureBuffer(input) {
         if (input instanceof Uint8Array) return input;
         if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
@@ -24,7 +52,14 @@ export class Lz4Base {
         throw new Error(`LZ4: Unsupported input type: ${typeof input}`);
     }
 
-    /** Writes uint32 LE */
+    /**
+     * Writes a 32-bit unsigned integer to a buffer in Little-Endian format.
+     *
+     * @param {Uint8Array} buffer - The destination buffer.
+     * @param {number} value - The integer value to write.
+     * @param {number} offset - The index in the buffer to start writing at.
+     * @returns {void}
+     */
     static writeU32(buffer, value, offset) {
         buffer[offset] = value & 0xff;
         buffer[offset + 1] = (value >>> 8) & 0xff;
@@ -32,23 +67,50 @@ export class Lz4Base {
         buffer[offset + 3] = (value >>> 24) & 0xff;
     }
 
-    /** Reads uint32 LE */
+    /**
+     * Reads a 32-bit unsigned integer from a buffer in Little-Endian format.
+     *
+     * @param {Uint8Array} buffer - The source buffer.
+     * @param {number} offset - The index to start reading from.
+     * @returns {number} The unsigned 32-bit integer value.
+     */
     static readU32(buffer, offset) {
         return (buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16) | (buffer[offset + 3] << 24)) >>> 0;
     }
 
-    /** Writes uint16 LE */
+    /**
+     * Writes a 16-bit unsigned integer to a buffer in Little-Endian format.
+     *
+     * @param {Uint8Array} buffer - The destination buffer.
+     * @param {number} value - The integer value to write.
+     * @param {number} offset - The index in the buffer to start writing at.
+     * @returns {void}
+     */
     static writeU16(buffer, value, offset) {
         buffer[offset] = value & 0xff;
         buffer[offset + 1] = (value >>> 8) & 0xff;
     }
 
-    /** Reads uint16 LE */
+    /**
+     * Reads a 16-bit unsigned integer from a buffer in Little-Endian format.
+     *
+     * @param {Uint8Array} buffer - The source buffer.
+     * @param {number} offset - The index to start reading from.
+     * @returns {number} The unsigned 16-bit integer value.
+     */
     static readU16(buffer, offset) {
         return (buffer[offset] | (buffer[offset + 1] << 8)) | 0;
     }
 
-    /** Resolves Block Size ID */
+    /**
+     * Maps a requested block size (in bytes) to the corresponding LZ4 Block ID.
+     *
+     * LZ4 supports specific block sizes: 64KB (4), 256KB (5), 1MB (6), and 4MB (7).
+     * This method finds the smallest ID that fits the requested size.
+     *
+     * @param {number} [reqSize] - The requested block size in bytes.
+     * @returns {number} The LZ4 Block ID (4, 5, 6, or 7).
+     */
     static getBlockId(reqSize) {
         if (!reqSize) return DEFAULT_BLOCK_ID;
         if (reqSize >= 4194304) return MAX_SIZE_4MB;
@@ -57,7 +119,20 @@ export class Lz4Base {
         return MAX_SIZE_64KB;
     }
 
-    /** Generates Frame Header */
+    /**
+     * Constructs the standard LZ4 Frame Header.
+     *
+     * The header consists of:
+     * - Magic Number (4 bytes)
+     * - FLG Byte (Version, Block Independence, Content Checksum)
+     * - BD Byte (Block Max Size)
+     * - Header Checksum (1 byte, xxHash32)
+     *
+     * @param {boolean} blockIndep - If true, blocks are independent (no dictionary dependencies).
+     * @param {boolean} contentChecksum - If true, a checksum for the entire content is expected at the end.
+     * @param {number} bdId - The Block Max Size ID (4-7).
+     * @returns {Uint8Array} A 7-byte buffer containing the complete Frame Header.
+     */
     static createFrameHeader(blockIndep, contentChecksum, bdId) {
         const header = new Uint8Array(7);
         Lz4Base.writeU32(header, MAGIC_NUMBER, 0);
