@@ -1,9 +1,38 @@
 {
   "name": "divortio-lz4",
   "version": "1.0.0",
+  "description": "A high-performance, universal LZ4 implementation for JavaScript. Supports Node.js, Browsers, Web Workers, and Edge Runtimes with zero dependencies.",
   "type": "module",
   "main": "src/lz4.js",
+  "exports": {
+    ".": "./src/lz4.js"
+  },
   "scripts": {
-    "test": "node runAll.test.mjs"
+    "test": "node tests/runAll.test.mjs",
+    "start": "node examples/web/lz4.web-server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/divortio/divortio-lz4.git"
+  },
+  "keywords": [
+    "lz4",
+    "compression",
+    "decompression",
+    "webassembly",
+    "stream",
+    "web-worker",
+    "opfs",
+    "cloudflare-workers",
+    "zero-copy",
+    "universal"
+  ],
+  "author": "Divortio",
+  "bugs": {
+    "url": "https://github.com/divortio/divortio-lz4/issues"
+  },
+  "homepage": "https://github.com/divortio/divortio-lz4#readme",
+  "engines": {
+    "node": ">=16.0.0"
   }
 }

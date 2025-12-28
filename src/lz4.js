@@ -19,6 +19,9 @@ import { createDecompressStream } from "./stream/streamDecompress.js";
 import { compressAsync } from "./stream/streamAsyncCompress.js";
 import { decompressAsync } from "./stream/streamAsyncDecompress.js";
 import { LZ4Worker } from './webWorker/workerClient.js';
+// Raw Block Imports
+import { compressBlock } from './block/blockCompress.js';
+import { decompressBlock } from './block/blockDecompress.js';
 
 // Import Type Handling Batteries
 import {
@@ -26,10 +29,45 @@ import {
     compressObject, decompressObject
 } from './shared/typeHandling.js';
 
+/**
+ *
+ * @type {{
+ *      compressRaw: ((function(Uint8Array, Uint8Array, Uint16Array): number)|*),
+ *      decompressRaw: ((function(Uint8Array, Uint8Array): number)|*),
+ *      compress: ((function((string|Object|ArrayBuffer|ArrayBufferView), {blockIndependence?: boolean, contentChecksum?: boolean, maxBlockSize?: number}=): Uint8Array)|*),
+ *      decompress: ((function((ArrayBuffer|ArrayBufferView)): Uint8Array)|*),
+ *      compressStream: ((function({blockIndependence?: boolean, contentChecksum?: boolean, maxBlockSize?: number}=): TransformStream<Uint8Array, Uint8Array>)|*),
+ *      decompressStream: ((function({maxBlockSize?: number}=): TransformStream<Uint8Array, Uint8Array>)|*),
+ *      compressAsync: ((function(Uint8Array, {blockIndependence?: boolean, contentChecksum?: boolean, maxBlockSize?: number}=, number=): Promise<Uint8Array>)|*),
+ *      decompressAsync: ((function(Uint8Array, {maxBlockSize?: number}=, number=): Promise<Uint8Array>)|*),
+ *      compressWorker: ((function(Uint8Array): Promise<Uint8Array>)|*),
+ *      decompressWorker: ((function(Uint8Array, number): Promise<Uint8Array>)|*),
+ *      compressString: ((function(string, Object=): Uint8Array)|*),
+ *      decompressString: ((function(Uint8Array): string)|*),
+ *      compressObject: ((function((Object|Array|number|boolean), Object=): Uint8Array)|*),
+ *      decompressObject: ((function(Uint8Array): (Object|Array|number|boolean))|*)
+ *      }}
+ */
 export const LZ4 = {
     // ========================================================================
     // 1. SYNCHRONOUS (Blocking)
     // ========================================================================
+    /**
+     * Compresses a raw block.
+     * @param {Uint8Array} input - Data to compress.
+     * @param {Uint8Array} output - Output buffer (must be large enough).
+     * @param {Uint16Array} hashTable - Reusable hash table.
+     * @returns {number} Bytes written.
+     */
+    compressRaw: compressBlock,
+
+    /**
+     * Decompresses a raw block.
+     * @param {Uint8Array} input - Compressed block data.
+     * @param {Uint8Array} output - Output buffer (must be allocated to originalSize).
+     * @returns {number} Bytes written.
+     */
+    decompressRaw: decompressBlock,
 
     /**
      * Synchronous Compression.
