@@ -115,7 +115,7 @@
             log('⏳ Sending to Worker for Compression...');
             const startC = performance.now();
 
-            // CALLING THE NEW API
+            // CALLING THE WORKER API
             const compressedBytes = await LZ4.compressWorker(inputBytes);
 
             const endC = performance.now();
@@ -128,12 +128,12 @@
             log(`   Ratio: ${((compressedBytes.byteLength / inputBytes.byteLength) * 100).toFixed(2)}%`);
 
             // --- Step C: Decompress (Off-Thread) ---
-            // Note: We must pass the original size for decompression
+            // UPDATE: Removed legacy originalSize argument.
+            // The Frame format now handles size automatically.
             log('⏳ Sending to Worker for Decompression...');
             const startD = performance.now();
 
-            // CALLING THE NEW API
-            const restoredBytes = await LZ4.decompressWorker(compressedBytes, inputBytes.byteLength);
+            const restoredBytes = await LZ4.decompressWorker(compressedBytes);
 
             const endD = performance.now();
             const durationD = (endD - startD).toFixed(2);
@@ -143,8 +143,6 @@
 
             // --- Step D: Verify ---
             if (restoredBytes.byteLength === inputBytes.byteLength) {
-                // Simple length check. For a true check, we'd compare bytes,
-                // but that might be slow on the main thread for huge files.
                 log(`✨ Success: Restored size matches original.`);
             } else {
                 log(`❌ Error: Size mismatch!`);
