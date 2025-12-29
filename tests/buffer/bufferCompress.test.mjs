@@ -1,7 +1,6 @@
 import { it, describe } from 'node:test';
 import assert from 'node:assert';
 import { compressBuffer } from '../../src/buffer/bufferCompress.js';
-import { decompressBuffer } from '../../src/buffer/bufferDecompress.js'; // Needed to verify
 import { MAGIC_NUMBER } from '../../src/shared/constants.js';
 import { Lz4Base } from '../../src/shared/lz4Base.js';
 
@@ -21,5 +20,29 @@ describe('Buffer Compression', () => {
 
         // LZ4 should compress repetitive data very well
         assert.ok(compressed.length < 100, `Compressed size ${compressed.length} should be small`);
+    });
+
+    // --- NEW TESTS FOR FLAT ARGUMENTS ---
+
+    it('should append Content Checksum when requested', () => {
+        const input = new Uint8Array([1, 2, 3, 4, 5]);
+
+        // Sig: (input, dict, maxBlockSize, blockIndep, contentChecksum)
+        const withChecksum = compressBuffer(input, null, 65536, false, true);
+        const withoutChecksum = compressBuffer(input, null, 65536, false, false);
+
+        // Checksum adds 4 bytes at the end
+        assert.strictEqual(withChecksum.length, withoutChecksum.length + 4, "Checksum should add 4 bytes");
+    });
+
+    it('should support Block Independence flag', () => {
+        const input = new Uint8Array(100).fill(1);
+
+        // Just verify it runs without error and produces valid output
+        const indep = compressBuffer(input, null, 65536, true, false); // Independent
+        const dep = compressBuffer(input, null, 65536, false, false);  // Dependent
+
+        assert.strictEqual(Lz4Base.readU32(indep, 0), MAGIC_NUMBER);
+        assert.strictEqual(Lz4Base.readU32(dep, 0), MAGIC_NUMBER);
     });
 });

@@ -25,4 +25,33 @@ describe('Buffer Decompression', () => {
         const badData = new Uint8Array([0, 1, 2, 3, 4, 5]);
         assert.throws(() => decompressBuffer(badData), /Invalid Magic/);
     });
+
+    // --- NEW TESTS FOR FLAT ARGUMENTS ---
+
+    it('should throw on Checksum Error by default', () => {
+        const input = new TextEncoder().encode("Integrity Check");
+        // Force checksum generation
+        const compressed = compressBuffer(input, null, 65536, false, true);
+
+        // Corrupt the last byte (part of the checksum)
+        compressed[compressed.length - 1] ^= 0xFF;
+
+        assert.throws(() => {
+            decompressBuffer(compressed);
+        }, /Checksum Error/, "Should detect corruption");
+    });
+
+    it('should ignore Checksum Error when verifyChecksum is false', () => {
+        const input = new TextEncoder().encode("Ignore Integrity");
+        // Force checksum generation
+        const compressed = compressBuffer(input, null, 65536, false, true);
+
+        // Corrupt the last byte
+        compressed[compressed.length - 1] ^= 0xFF;
+
+        // Sig: (input, dict, verifyChecksum)
+        const decompressed = decompressBuffer(compressed, null, false);
+
+        assertBufferEquals(decompressed, input, "Should decompress despite bad checksum");
+    });
 });

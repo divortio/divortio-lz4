@@ -31,10 +31,16 @@ import './buffer/bufferDecompress.test.mjs';
 import './stream/streamCompress.test.mjs';
 import './stream/streamDecompress.test.mjs';
 
-// --- 6. Compliance ---
+// --- 6. Advanced Features (NEW) ---
+import './raw/raw.test.mjs';
+import './async/async.test.mjs';
+import './types/types.test.mjs';
+import './dictionary/dictionary.test.mjs';
+
+// --- 7. Compliance ---
 import './golden.test.mjs';
 
-// --- 7. IDE Discovery Anchor ---
+// --- 8. IDE Discovery Anchor ---
 describe('Divortio LZ4 Suite Aggregator', () => {
     it('should have registered all sub-modules successfully', () => {
         // This test exists solely to ensure IDEs recognize this file

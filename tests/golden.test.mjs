@@ -31,7 +31,6 @@ describe('Golden Reference Tests (Spec Compliance)', () => {
      * Test Case 2: Empty Frame with 4MB Block Size
      * Header: 60 70 (Indep, 4MB)
      * Header Checksum: xxHash32(60 70) >> 8 = 0x73
-     * **FIXED**: Previous checksum B9 was incorrect for this header.
      */
     it('should decompress a valid Empty Frame (4MB blocks)', () => {
         // Magic: 04 22 4D 18
@@ -50,12 +49,6 @@ describe('Golden Reference Tests (Spec Compliance)', () => {
      * Content Checksum of "Hello World": 0xB1FD16EE (LE: EE 16 FD B1).
      */
     it('should decompress a frame with Content Checksum', () => {
-        // Magic: 04 22 4D 18
-        // Header: 64 40 A7
-        // Block: 0B 00 00 80 (Size 11, Uncompressed)
-        // Data: "Hello World"
-        // EndMark: 00 00 00 00
-        // Content Checksum: EE 16 FD B1
         const hex = "04224D186440A70B00008048656c6c6f20576f726c6400000000EE16FDB1";
         const input = fromHex(hex);
         const output = decompressBuffer(input);
@@ -63,22 +56,35 @@ describe('Golden Reference Tests (Spec Compliance)', () => {
     });
 
     /**
-     * Test Case 4: Verify Header Generation matches Spec
-     * We generate a frame and verify the bytes match the spec-derived values.
+     * Test Case 4: Verify Header Generation (Standard)
+     * Matches flags used in Test Case 1.
      */
-    it('should generate a spec-compliant header for "Hello World"', () => {
+    it('should generate a spec-compliant header for "Hello World" (Standard)', () => {
         const input = new TextEncoder().encode("Hello World");
 
-        // Force specific options to match Test Case 1
-        const compressed = compressBuffer(input, {
-            blockIndependence: true,
-            contentChecksum: false,
-            maxBlockSize: 65536
-        });
+        // Options: dict=null, size=65536, indep=true, checksum=false
+        const compressed = compressBuffer(input, null, 65536, true, false);
 
-        // 60 40 82
-        assert.strictEqual(compressed[4], 0x60);
-        assert.strictEqual(compressed[5], 0x40);
-        assert.strictEqual(compressed[6], 0x82);
+        // Header: 60 40 82
+        assert.strictEqual(compressed[4], 0x60, "FLG Mismatch (Standard)");
+        assert.strictEqual(compressed[5], 0x40, "BD Mismatch (Standard)");
+        assert.strictEqual(compressed[6], 0x82, "HC Mismatch (Standard)");
+    });
+
+    /**
+     * Test Case 5: Verify Header Generation (With Checksum)
+     * Matches flags used in Test Case 3.
+     */
+    it('should generate a spec-compliant header with Content Checksum', () => {
+        const input = new TextEncoder().encode("Hello World");
+
+        // Options: dict=null, size=65536, indep=true, checksum=true
+        const compressed = compressBuffer(input, null, 65536, true, true);
+
+        // Header: 64 40 A7
+        // FLG 0x64 = Version(01) | Indep(1) | Checksum(1)
+        assert.strictEqual(compressed[4], 0x64, "FLG Mismatch (Checksum)");
+        assert.strictEqual(compressed[5], 0x40, "BD Mismatch (Checksum)");
+        assert.strictEqual(compressed[6], 0xA7, "HC Mismatch (Checksum)");
     });
 });

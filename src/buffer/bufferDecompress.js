@@ -9,11 +9,10 @@ import { Lz4Base } from '../shared/lz4Base.js';
 
 /**
  * Decompresses an LZ4 Frame (Synchronous).
- * Supports Block Dependency (Window) and External Dictionaries.
  *
- * @param {ArrayBuffer|ArrayBufferView} input - The LZ4 Frame.
- * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary (history).
- * @param {boolean} [verifyChecksum=true] - If false, skips content checksum verification (faster).
+ * @param {ArrayBuffer|ArrayBufferView|Uint8Array} input - The LZ4 Frame.
+ * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary.
+ * @param {boolean} [verifyChecksum=true] - If false, skips content checksum verification.
  * @returns {Uint8Array} Decompressed data.
  */
 export function decompressBuffer(input, dictionary = null, verifyChecksum = true) {
@@ -37,7 +36,7 @@ export function decompressBuffer(input, dictionary = null, verifyChecksum = true
     const hasContentChecksum = (flg & FLG_CONTENT_CHECKSUM_MASK) !== 0;
     const hasDictId = (flg & FLG_DICT_ID_MASK) !== 0;
 
-    // 3. Parse BD (Max Block Size)
+    // 3. Parse BD
     const bd = data[pos++];
     const maxBlockId = (bd & 0x70) >> 4;
     const maxBlockSize = BLOCK_MAX_SIZES[maxBlockId] || 65536;
@@ -50,14 +49,12 @@ export function decompressBuffer(input, dictionary = null, verifyChecksum = true
     if (hasContentSize) pos = (pos + 8) | 0;
     if (hasDictId) pos = (pos + 4) | 0;
 
-    // --- Optimization: Window Management ---
+    // --- Window Management ---
     let window = dictionary instanceof Uint8Array ? dictionary : new Uint8Array(0);
     const MAX_WINDOW_SIZE = 65536;
 
     const outputChunks = [];
     let totalOutputLen = 0 | 0;
-
-    // Workspace for block decompression
     const workspace = new Uint8Array(maxBlockSize);
 
     // 5. Read Blocks
@@ -82,7 +79,7 @@ export function decompressBuffer(input, dictionary = null, verifyChecksum = true
         let decodedChunk;
 
         if (isUncompressed) {
-            decodedChunk = blockData.slice(0);
+            decodedChunk = blockData.slice(0); // Copy safe
         } else {
             const written = decompressBlock(blockData, workspace, window);
             decodedChunk = workspace.slice(0, written);
@@ -111,7 +108,7 @@ export function decompressBuffer(input, dictionary = null, verifyChecksum = true
         }
     }
 
-    // 6. Merge & Validate
+    // 6. Merge
     const result = new Uint8Array(totalOutputLen);
     let offset = 0 | 0;
     for (let i = 0; i < outputChunks.length; i++) {

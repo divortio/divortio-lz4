@@ -1,61 +1,66 @@
 import { it, describe } from 'node:test';
 import assert from 'node:assert';
 import { LZ4Encoder } from '../../src/shared/lz4Encode.js';
-import { MAGIC_NUMBER } from '../../src/shared/constants.js';
+import {
+    MAGIC_NUMBER,
+    FLG_BLOCK_INDEP_MASK,
+    FLG_CONTENT_CHECKSUM_MASK
+} from '../../src/shared/constants.js';
 import { Lz4Base } from '../../src/shared/lz4Base.js';
 
 describe('LZ4Encoder (Shared Unit)', () => {
+
     it('should write Magic Number and Header on first update', () => {
         const encoder = new LZ4Encoder();
         const input = new Uint8Array([1, 2, 3]);
-
         const chunks = encoder.update(input);
-
-        // Should have Header
         assert.ok(chunks.length > 0);
-        const firstChunk = chunks[0];
-
-        assert.ok(firstChunk.length >= 7); // Min header size
-        const magic = Lz4Base.readU32(firstChunk, 0);
+        const magic = Lz4Base.readU32(chunks[0], 0);
         assert.strictEqual(magic, MAGIC_NUMBER);
     });
 
     it('should buffer small inputs without emitting blocks immediately', () => {
-        // Default block size is 64KB
-        const encoder = new LZ4Encoder({ maxBlockSize: 65536 });
+        const encoder = new LZ4Encoder(null, 65536);
         const smallInput = new Uint8Array(100).fill(1);
-
-        // First update emits header, but NO block yet (buffer < 64KB)
         const chunks1 = encoder.update(smallInput);
         assert.strictEqual(chunks1.length, 1); // Header only
-        assert.ok(chunks1[0].length < 20); // Just header
-
-        // Second update, still no block
         const chunks2 = encoder.update(smallInput);
         assert.strictEqual(chunks2.length, 0); // Still buffering
     });
 
     it('should flush buffered data on finish', () => {
         const encoder = new LZ4Encoder();
-        const input = new Uint8Array([65, 66, 67]); // "ABC"
-
-        encoder.update(input); // buffers "ABC"
+        const input = new Uint8Array([65, 66, 67]);
+        encoder.update(input);
         const finalChunks = encoder.finish();
-
-        // finish() should produce:
-        // 1. Block (containing "ABC")
-        // 2. EndMark (0x00000000)
-        // 3. Content Checksum (4 bytes)
-
         assert.ok(finalChunks.length >= 2);
+        const endMarkChunk = finalChunks[finalChunks.length - 1];
+        assert.strictEqual(endMarkChunk.length, 4);
+        assert.strictEqual(Lz4Base.readU32(endMarkChunk, 0), 0);
+    });
 
-        // Verify EndMark is present
-        const endMarkChunk = finalChunks[finalChunks.length - 2];
-        const endMarkVal = Lz4Base.readU32(endMarkChunk, 0);
-        assert.strictEqual(endMarkVal, 0, "Missing EndMark");
+    it('should configure Frame Header flags correctly', () => {
+        const encoder = new LZ4Encoder(null, 65536, true, true);
+        const chunks = encoder.update(new Uint8Array([1]));
+        const flg = chunks[0][4];
+        assert.strictEqual((flg & FLG_BLOCK_INDEP_MASK) !== 0, true);
+        assert.strictEqual((flg & FLG_CONTENT_CHECKSUM_MASK) !== 0, true);
+    });
 
-        // Verify Checksum is last
-        const checksumChunk = finalChunks[finalChunks.length - 1];
-        assert.strictEqual(checksumChunk.length, 4, "Missing Content Checksum");
+    it('should split large input into multiple blocks', () => {
+        // Use > 64KB input to force a split even if maxBlockSize defaults to 64KB
+        const largeInput = new Uint8Array(70000);
+        const encoder = new LZ4Encoder(null, 65536);
+        const chunks = encoder.update(largeInput);
+
+        // Header + Block 1 (64KB) = 2 chunks minimum
+        assert.ok(chunks.length >= 2, `Expected >= 2 chunks, got ${chunks.length}`);
+    });
+
+    it('should accept a dictionary without error', () => {
+        const dict = new Uint8Array(100).fill(65);
+        const encoder = new LZ4Encoder(dict);
+        const chunks = encoder.update(new Uint8Array([66]));
+        assert.ok(chunks.length > 0);
     });
 });

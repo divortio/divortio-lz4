@@ -14,6 +14,7 @@ import {
     HASH_TABLE_SIZE,
     MIN_MATCH
 } from "./constants.js";
+
 export class LZ4Encoder extends Lz4Base {
 
     /**
@@ -48,8 +49,8 @@ export class LZ4Encoder extends Lz4Base {
         this.inputStart = this.dictSize;
         this.inputEnd = this.dictSize;
 
-        if (options.dictionary && options.dictionary.length > 0) {
-            this._initDictionary(options.dictionary);
+        if (dictionary && dictionary.length > 0) {
+            this._initDictionary(dictionary);
         }
 
         // Output Scratch Buffer (Worst case expansion)
@@ -79,16 +80,16 @@ export class LZ4Encoder extends Lz4Base {
 
         // 2. Warm up the Hash Table
         // We must hash these bytes so the compressor can find matches within them.
-        // We treat the positions as negative relative to the start of the NEW data,
-        // or absolute within the window. `compressBlock` expects absolute window indices.
         const end = this.dictSize - MIN_MATCH;
         const base = this.window;
         const table = this.hashTable;
 
         // Rolling hash insert
         for (let i = destStart; i <= end; i++) {
-            // Hash the 4 bytes at i
-            const seq = (base[i] << 24) | (base[i + 1] << 16) | (base[i + 2] << 8) | base[i + 3];
+            // FIX: Use Little Endian sequence generation to match compressBlock
+            // Old (Bug): (base[i] << 24) | ...
+            const seq = (base[i] | (base[i + 1] << 8) | (base[i + 2] << 16) | (base[i + 3] << 24));
+
             // Multiplicative hash (LZ4 standard)
             const hash = (Math.imul(seq, 0x9E3779B1) >>> (32 - 14)) & (HASH_TABLE_SIZE - 1);
             table[hash] = i;

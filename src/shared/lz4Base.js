@@ -96,15 +96,18 @@ export class Lz4Base {
 
     /**
      * Maps a requested block size (in bytes) to the corresponding LZ4 Block ID.
-     * @param {number} [reqSize] - The requested block size in bytes.
+     * Logic: Returns the smallest standard block size that can hold `reqSize`.
+     *  @param {number} [reqSize] - The requested block size in bytes.
      * @returns {number} The LZ4 Block ID (4, 5, 6, or 7).
      */
     static getBlockId(reqSize) {
         if (!reqSize) return DEFAULT_BLOCK_ID;
-        if (reqSize >= 4194304) return MAX_SIZE_4MB;
-        if (reqSize >= 1048576) return MAX_SIZE_1MB;
-        if (reqSize >= 262144) return MAX_SIZE_256KB;
-        return MAX_SIZE_64KB;
+
+        // Fix: Use strict thresholds (> X) to bump to next tier
+        if (reqSize > 1048576) return MAX_SIZE_4MB;   // > 1MB -> 4MB
+        if (reqSize > 262144) return MAX_SIZE_1MB;    // > 256KB -> 1MB
+        if (reqSize > 65536) return MAX_SIZE_256KB;   // > 64KB -> 256KB
+        return MAX_SIZE_64KB;                         // <= 64KB -> 64KB
     }
 
     /**
