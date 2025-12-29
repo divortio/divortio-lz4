@@ -34,5 +34,10 @@
   "homepage": "https://github.com/divortio/divortio-lz4#readme",
   "engines": {
     "node": ">=16.0.0"
+  },
+  "devDependencies": {
+    "lz4-napi": "2.9.0",
+    "lz4js": "0.2.0"
   }
+
 }
