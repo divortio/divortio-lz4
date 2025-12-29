@@ -42,7 +42,9 @@ export const LAST_LITERALS = 5 | 0;
 export const MF_LIMIT = (LAST_LITERALS + 7) | 0;
 
 export const HASH_SEED = 0x9E3779B1 | 0;
-export const HASH_LOG = 14 | 0;             // 16KB Hash Table (2^14)
+// TUNING: Increased from 14 (16KB) to 16 (64KB) to match the Window Size.
+// This reduces hash collisions and improves compression ratio.
+export const HASH_LOG = 16 | 0;             // 64KB Hash Table (2^16)
 export const HASH_TABLE_SIZE = (1 << HASH_LOG) | 0;
 export const HASH_SHIFT = (32 - HASH_LOG) | 0;
 
