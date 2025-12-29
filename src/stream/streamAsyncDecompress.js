@@ -3,27 +3,21 @@ import { createTimeSlicer } from "./scheduler.js";
 
 /**
  * Asynchronously decompresses an LZ4 Frame into raw binary data.
+ * Uses "Time Slicing" to prevent blocking the main thread.
  *
- * This function utilizes a "Time Slicing" strategy to prevent blocking the
- * main thread (UI or Event Loop). It chunks the input data and yields execution
- * periodically, allowing the browser to render frames or the server to handle
- * other requests during the decompression process.
- *
- * @param {Uint8Array} input - The compressed LZ4 Frame to decompress.
- * @param {Object} [options] - Configuration options.
- * @param {number} [options.maxBlockSize=65536] - Helper to pre-allocate buffers if the header is missing size data (rare).
- * @param {number} [chunkSize=524288] - The size of data chunks (in bytes) to process per tick.
- * Defaults to 512KB. Smaller chunks yield more often; larger chunks improve raw throughput.
- * @returns {Promise<Uint8Array>} A Promise that resolves to the complete decompressed data.
+ * @param {Uint8Array} input - The compressed LZ4 Frame.
+ * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary.
+ * @param {boolean} [verifyChecksum=true] - If false, skips checksum verification.
+ * @param {number} [chunkSize=524288] - Processing chunk size (default 512KB).
+ * @returns {Promise<Uint8Array>} Resolved decompressed data.
  */
-export async function decompressAsync(input, options = {}, chunkSize = 524288) {
-    // 1. Initialize Stream & Scheduler
-    const stream = createDecompressStream(options);
+export async function decompressAsync(input, dictionary = null, verifyChecksum = true, chunkSize = 524288) {
+    // 1. Initialize Stream
+    const stream = createDecompressStream(dictionary, verifyChecksum);
     const reader = stream.readable.getReader();
     const writer = stream.writable.getWriter();
 
-    // Target a 12ms budget. This leaves ~4ms buffer in a 16ms frame (60fps)
-    // for the browser to handle rendering and other tasks.
+    // Target a 12ms budget
     const yieldIfOverBudget = createTimeSlicer(12);
 
     /** @type {Uint8Array[]} Storage for decompressed chunks */
@@ -31,7 +25,6 @@ export async function decompressAsync(input, options = {}, chunkSize = 524288) {
     let totalLength = 0;
 
     // 2. Start Reader (Parallel)
-    // Captures output as it becomes available from the transform stream
     const readPromise = (async () => {
         while (true) {
             const { done, value } = await reader.read();
@@ -51,10 +44,10 @@ export async function decompressAsync(input, options = {}, chunkSize = 524288) {
         const end = Math.min(offset + chunkSize, len);
         const chunk = input.subarray(offset, end);
 
-        // Write the chunk to the stream.
+        // Write chunk
         await writer.write(chunk);
 
-        // Check our time budget. If we've been running >12ms, yield to the event loop.
+        // Yield if needed
         await yieldIfOverBudget();
 
         offset = end;
@@ -62,9 +55,9 @@ export async function decompressAsync(input, options = {}, chunkSize = 524288) {
 
     // 4. Finalize
     await writer.close();
-    await readPromise; // Ensure we have collected all output
+    await readPromise;
 
-    // 5. Merge & Return
+    // 5. Merge
     const result = new Uint8Array(totalLength);
     let pos = 0;
     for (const chunk of resultChunks) {

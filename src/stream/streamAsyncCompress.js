@@ -4,28 +4,25 @@ import { createTimeSlicer } from "./scheduler.js";
 /**
  * Asynchronously compresses a raw buffer into an LZ4 Frame.
  *
- * This function utilizes a "Time Slicing" strategy to prevent blocking the
- * main thread (UI or Event Loop). It chunks the input data and yields execution
- * periodically, allowing the browser to render frames or the server to handle
- * other requests during the compression process.
+ * Uses "Time Slicing" to yield to the main thread (UI/Event Loop) periodically,
+ * preventing long blocking operations during large file compression.
  *
- * @param {Uint8Array} input - The raw binary data to compress.
- * @param {Object} [options] - Configuration options for the LZ4 Encoder.
- * @param {boolean} [options.blockIndependence=true] - If true, blocks are independent (no dictionary dependency).
- * @param {boolean} [options.contentChecksum=true] - If true, appends an xxHash32 checksum of the original content.
- * @param {number} [options.maxBlockSize=65536] - The maximum size of a single LZ4 block (default 64KB).
- * @param {number} [chunkSize=524288] - The size of data chunks (in bytes) to process per tick.
- * Defaults to 512KB. Smaller chunks yield more often; larger chunks improve raw throughput.
- * @returns {Promise<Uint8Array>} A Promise that resolves to the complete compressed LZ4 Frame.
+ * @param {Uint8Array} input
+ * @param {Uint8Array|null} [dictionary=null]
+ * @param {number} [maxBlockSize=65536]
+ * @param {boolean} [blockIndependence=false]
+ * @param {boolean} [contentChecksum=false]
+ * @param {number} [chunkSize=524288]
+ * @returns {Promise<Uint8Array>}
  */
-export async function compressAsync(input, options = {}, chunkSize = 524288) {
-    // 1. Initialize Stream & Scheduler
-    const stream = createCompressStream(options);
+export async function compressAsync(input, dictionary = null, maxBlockSize = 65536, blockIndependence = false, contentChecksum = false, chunkSize = 524288) {
+    // Pass flat args to the stream factory
+    const stream = createCompressStream(dictionary, maxBlockSize, blockIndependence, contentChecksum);
+
     const reader = stream.readable.getReader();
     const writer = stream.writable.getWriter();
 
-    // Target a 12ms budget. This leaves ~4ms buffer in a 16ms frame (60fps)
-    // for the browser to handle rendering and other tasks.
+    // Target a 12ms budget (allows ~4ms overhead for 60fps rendering)
     const yieldIfOverBudget = createTimeSlicer(12);
 
     /** @type {Uint8Array[]} Storage for compressed chunks */
@@ -33,8 +30,6 @@ export async function compressAsync(input, options = {}, chunkSize = 524288) {
     let totalLength = 0;
 
     // 2. Start Reader (Parallel)
-    // We start reading immediately so that as soon as the writer pushes data,
-    // the underlying transform stream processes it and makes it available here.
     const readPromise = (async () => {
         while (true) {
             const { done, value } = await reader.read();
@@ -54,11 +49,10 @@ export async function compressAsync(input, options = {}, chunkSize = 524288) {
         const end = Math.min(offset + chunkSize, len);
         const chunk = input.subarray(offset, end);
 
-        // Write the chunk to the stream.
-        // Note: We await strict backpressure here, though for LZ4 it's rarely blocking.
+        // Write the chunk to the stream
         await writer.write(chunk);
 
-        // Check our time budget. If we've been running >12ms, yield to the event loop.
+        // Yield if we exceeded our frame budget
         await yieldIfOverBudget();
 
         offset = end;
@@ -66,9 +60,9 @@ export async function compressAsync(input, options = {}, chunkSize = 524288) {
 
     // 4. Finalize
     await writer.close();
-    await readPromise; // Ensure we have collected all output
+    await readPromise;
 
-    // 5. Merge & Return
+    // 5. Merge
     const result = new Uint8Array(totalLength);
     let pos = 0;
     for (const chunk of resultChunks) {

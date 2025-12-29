@@ -1,163 +1,153 @@
 /**
  * @fileoverview Stateful LZ4 Encoder for streaming compression.
- *
- * This module implements a buffering state machine that accepts data chunks of any size,
- * accumulates them until they reach the target block size (e.g., 64KB, 4MB), and then
- * compresses them. It manages the full lifecycle of an LZ4 Frame, including:
- * - Frame Headers
- * - Block Compression (with optional dependency)
- * - Content Checksums
- * - EndMarks
+ * Optimized for Sliding Window (Lookback) and External Dictionaries.
  *
  * @module shared/lz4Encode
  */
 
-import {XXHash32Stream} from "../xxhash32/xxhash32.stream.js";
-import {compressBlock} from "../block/blockCompress.js";
-import {Lz4Base} from "./lz4Base.js";
-import {BLOCK_MAX_SIZES} from "./constants.js";
-
-/**
- * A stateful LZ4 Frame encoder.
- *
- * Designed for use in streams (Node.js TransformStreams or Web Streams), this class
- * buffers incoming data until enough is available to fill a standard LZ4 block.
- * It handles the complex logic of writing headers only once, maintaining dictionary
- * state (if block independence is disabled), and calculating rolling checksums.
- *
- * @extends Lz4Base
- */
+import { XXHash32Stream } from "../xxhash32/xxhash32.stream.js";
+import { compressBlock } from "../block/blockCompress.js";
+import { Lz4Base } from "./lz4Base.js";
+import {
+    BLOCK_MAX_SIZES,
+    DICT_SIZE,
+    HASH_TABLE_SIZE,
+    MIN_MATCH
+} from "./constants.js";
 export class LZ4Encoder extends Lz4Base {
 
     /**
-     * Creates a new LZ4 Encoder instance.
-     *
-     * @param {Object} [options] - Configuration options.
-     * @param {boolean} [options.blockIndependence=true] - If true, blocks are compressed independently.
-     * Disabling this improves compression ratio but prevents parallel decompression.
-     * @param {boolean} [options.contentChecksum=true] - If true, an xxHash32 checksum of the entire content is appended.
-     * @param {number} [options.maxBlockSize=65536] - Target size for LZ4 blocks (defaults to 64KB).
+     * @param {Uint8Array|null} [dictionary=null] - Initial dictionary/history context.
+     * @param {number} [maxBlockSize=65536] - Target block size.
+     * @param {boolean} [blockIndependence=false] - If false, matches can cross block boundaries.
+     * @param {boolean} [contentChecksum=false] - If true, appends xxHash32 of original content.
      */
-    constructor(options = {}) {
+    constructor(dictionary = null, maxBlockSize = 65536, blockIndependence = false, contentChecksum = false) {
         super();
-        /** @type {boolean} */
-        this.blockIndependence = options.blockIndependence !== false;
-        /** @type {boolean} */
-        this.contentChecksum = options.contentChecksum !== false;
-
-        // --- Configuration ---
-        /** @type {number} Internal ID representing the max block size. */
-        this.bdId = Lz4Base.getBlockId(options.maxBlockSize);
-        /** @type {number} Actual max block size in bytes (e.g., 65536). */
+        this.blockIndependence = blockIndependence;
+        this.contentChecksum = contentChecksum;
+        this.bdId = Lz4Base.getBlockId(maxBlockSize);
         this.maxBlockSize = BLOCK_MAX_SIZES[this.bdId];
 
-        // --- State ---
-        /**
-         * Internal buffer for accumulating incomplete blocks.
-         * @type {Uint8Array}
-         */
-        this.buffer = new Uint8Array(0);
-
-        /** @type {boolean} Flag to ensure the frame header is written exactly once. */
-        this.hasWrittenHeader = false;
+        // --- Memory Management ---
+        // Window = [Dictionary Space (64KB)] + [Current Block Space (MaxBlockSize)]
+        this.dictSize = DICT_SIZE; // 64KB
+        this.windowSize = this.dictSize + this.maxBlockSize;
+        this.window = new Uint8Array(this.windowSize);
 
         // --- Resources ---
-        /**
-         * Hash table for Lempel-Ziv deduplication.
-         * Allocated once and reused to reduce GC pressure.
-         * @type {Uint16Array}
-         */
-        this.hashTable = new Uint16Array(16384);
+        // Hash Table for match finding (16KB size for 64KB window)
+        this.hashTable = new Int32Array(HASH_TABLE_SIZE);
+        this.hashTable.fill(-1);
 
-        /**
-         * Rolling checksum calculator for the full content stream.
-         * @type {XXHash32Stream|null}
-         */
         this.checksumStream = this.contentChecksum ? new XXHash32Stream(0) : null;
+        this.hasWrittenHeader = false;
 
-        // --- Scratch Buffer ---
-        // Pre-allocate the worst-case size for a compressed block to avoid resizing.
-        // Formula: MaxBlockSize + (MaxBlockSize/255) + 32 (safety margin)
+        // --- Dictionary Initialization ---
+        // We start writing new data at `dictSize`.
+        this.inputStart = this.dictSize;
+        this.inputEnd = this.dictSize;
+
+        if (options.dictionary && options.dictionary.length > 0) {
+            this._initDictionary(options.dictionary);
+        }
+
+        // Output Scratch Buffer (Worst case expansion)
         const worstCase = (this.maxBlockSize + (this.maxBlockSize / 255 | 0) + 32) | 0;
-        /** @type {Uint8Array} Workspace for compressing a single block. */
-        this.scratchBuffer = new Uint8Array(worstCase);
+        this.outputBuffer = new Uint8Array(worstCase);
+    }
+
+    /**
+     * Loads the dictionary into the window and "warms up" the hash table.
+     * @private
+     */
+    _initDictionary(dict) {
+        // We only care about the last 64KB of the dictionary
+        let len = dict.length;
+        let offset = 0;
+
+        if (len > this.dictSize) {
+            offset = len - this.dictSize;
+            len = this.dictSize;
+        }
+
+        // 1. Copy into the "Dictionary Space" of the window (0..64KB)
+        // We place it at the *end* of the dictionary space so it matches
+        // the sliding window logic (data is always immediately before inputStart).
+        const destStart = this.dictSize - len;
+        this.window.set(dict.subarray(offset, offset + len), destStart);
+
+        // 2. Warm up the Hash Table
+        // We must hash these bytes so the compressor can find matches within them.
+        // We treat the positions as negative relative to the start of the NEW data,
+        // or absolute within the window. `compressBlock` expects absolute window indices.
+        const end = this.dictSize - MIN_MATCH;
+        const base = this.window;
+        const table = this.hashTable;
+
+        // Rolling hash insert
+        for (let i = destStart; i <= end; i++) {
+            // Hash the 4 bytes at i
+            const seq = (base[i] << 24) | (base[i + 1] << 16) | (base[i + 2] << 8) | base[i + 3];
+            // Multiplicative hash (LZ4 standard)
+            const hash = (Math.imul(seq, 0x9E3779B1) >>> (32 - 14)) & (HASH_TABLE_SIZE - 1);
+            table[hash] = i;
+        }
     }
 
     /**
      * Processes a chunk of raw data.
-     *
-     * This method buffers the data. If the internal buffer exceeds the `maxBlockSize`,
-     * one or more compressed blocks are generated and returned.
-     *
-     * @param {Uint8Array} chunk - The raw binary input.
-     * @returns {Uint8Array[]} An array of LZ4 frame parts (Header, Compressed Blocks).
+     * @param {Uint8Array} chunk
+     * @returns {Uint8Array[]}
      */
     update(chunk) {
         const output = [];
 
-        // 1. Write Header (First call only)
         if (!this.hasWrittenHeader) {
             output.push(Lz4Base.createFrameHeader(this.blockIndependence, this.contentChecksum, this.bdId));
             this.hasWrittenHeader = true;
         }
 
-        // 2. Update Content Checksum & Accumulate Buffer
         if (this.checksumStream) this.checksumStream.update(chunk);
 
-        if (this.buffer.length > 0) {
-            // Append to existing buffer
-            const newBuf = new Uint8Array(this.buffer.length + chunk.length);
-            newBuf.set(this.buffer);
-            newBuf.set(chunk, this.buffer.length);
-            this.buffer = newBuf;
-        } else {
-            this.buffer = chunk;
-        }
+        let chunkOffset = 0;
+        let chunkRemaining = chunk.length;
 
-        // 3. Process Full Blocks
-        while (this.buffer.length >= this.maxBlockSize) {
-            // Slice off a full block
-            const rawBlock = this.buffer.subarray(0, this.maxBlockSize);
-            this.buffer = this.buffer.slice(this.maxBlockSize);
+        while (chunkRemaining > 0) {
+            // Space remaining in the "Current Block" section of the window
+            const spaceInBlock = (this.windowSize - this.inputEnd) | 0;
 
-            // Compress and push
-            output.push(this._encodeBlock(rawBlock));
+            const toCopy = (chunkRemaining < spaceInBlock) ? chunkRemaining : spaceInBlock;
 
-            // Reset dictionary if independent blocks are required
-            if (this.blockIndependence) this.hashTable.fill(0xFFFF);
+            this.window.set(chunk.subarray(chunkOffset, chunkOffset + toCopy), this.inputEnd);
+
+            this.inputEnd += toCopy;
+            chunkOffset += toCopy;
+            chunkRemaining -= toCopy;
+
+            if (this.inputEnd === this.windowSize) {
+                output.push(this._flushBlock());
+            }
         }
         return output;
     }
 
-    /**
-     * Finalizes the LZ4 Frame.
-     *
-     * Flushes any remaining data in the buffer as a final block, appends the
-     * EndMark (0x00000000), and appends the Content Checksum if enabled.
-     *
-     * @returns {Uint8Array[]} An array containing the final parts of the frame.
-     */
     finish() {
         const output = [];
-
-        // Edge case: Empty stream (finish called without update)
         if (!this.hasWrittenHeader) {
             output.push(Lz4Base.createFrameHeader(this.blockIndependence, this.contentChecksum, this.bdId));
             this.hasWrittenHeader = true;
         }
 
-        // Flush remaining buffer
-        if (this.buffer.length > 0) {
-            output.push(this._encodeBlock(this.buffer));
-            this.buffer = new Uint8Array(0);
+        if (this.inputEnd > this.inputStart) {
+            output.push(this._flushBlock());
         }
 
-        // Append EndMark (4 bytes of zeros)
+        // EndMark
         const endMark = new Uint8Array(4);
-        Lz4Base.writeU32(endMark, 0, 0);
         output.push(endMark);
 
-        // Append Content Checksum
+        // Content Checksum
         if (this.checksumStream) {
             const buf = new Uint8Array(4);
             Lz4Base.writeU32(buf, this.checksumStream.finalize(), 0);
@@ -166,41 +156,69 @@ export class LZ4Encoder extends Lz4Base {
         return output;
     }
 
-    /**
-     * Internal helper to compress a single raw block.
-     * Handles the decision to store the block Compressed vs Uncompressed.
-     *
-     * @param {Uint8Array} rawBlock - The raw data to compress.
-     * @returns {Uint8Array} The formatted LZ4 Block (Size + Data).
-     * @private
-     */
-    _encodeBlock(rawBlock) {
-        // Use scratch buffer for compression to avoid allocation
-        // Offset by 4 bytes to leave room for the Block Size integer
-        const dest = this.scratchBuffer.subarray(4);
-        const compSize = compressBlock(rawBlock, dest, this.hashTable);
-        const blockSize = rawBlock.length | 0;
+    _flushBlock() {
+        const srcLen = (this.inputEnd - this.inputStart) | 0;
 
-        // Decision: Is compression worth it?
-        if (compSize > 0 && compSize < blockSize) {
-            // Yes: Store Compressed
+        // 1. Compress
+        // inputStart is where the *new* data began (usually 65536).
+        // The compressor looks at window[0...inputStart] as valid dictionary history.
+        const dest = this.outputBuffer.subarray(4);
+        const compSize = compressBlock(this.window, dest, this.inputStart, srcLen, this.hashTable);
+
+        let resultBlock;
+
+        // 2. Decision: Compressed vs Uncompressed
+        if (compSize > 0 && compSize < srcLen) {
             const header = new Uint8Array(4);
             Lz4Base.writeU32(header, compSize, 0);
-
-            const block = new Uint8Array(4 + compSize);
-            block.set(header, 0);
-            block.set(dest.subarray(0, compSize), 4);
-            return block;
+            resultBlock = new Uint8Array(4 + compSize);
+            resultBlock.set(header, 0);
+            resultBlock.set(dest.subarray(0, compSize), 4);
         } else {
-            // No: Store Uncompressed (Raw)
-            // Flag: High bit of size (0x80000000) indicates uncompressed
             const header = new Uint8Array(4);
-            Lz4Base.writeU32(header, blockSize | 0x80000000, 0);
-
-            const block = new Uint8Array(4 + blockSize);
-            block.set(header, 0);
-            block.set(rawBlock, 4);
-            return block;
+            Lz4Base.writeU32(header, srcLen | 0x80000000, 0);
+            resultBlock = new Uint8Array(4 + srcLen);
+            resultBlock.set(header, 0);
+            resultBlock.set(this.window.subarray(this.inputStart, this.inputEnd), 4);
         }
+
+        // 3. Slide Window
+        if (this.blockIndependence) {
+            this.inputEnd = this.inputStart;
+            this.hashTable.fill(-1);
+            // Re-initialize pointers for a fresh block (optional but cleaner)
+            this.inputStart = this.dictSize;
+            this.inputEnd = this.dictSize;
+        } else {
+            // Dependent Blocks: Shift data back to keep history
+            if (this.inputEnd > this.dictSize) {
+                const shift = (this.inputEnd - this.dictSize) | 0;
+
+                // Shift window content
+                this.window.copyWithin(0, shift, this.inputEnd);
+
+                // Adjust Pointers
+                this.inputStart = this.dictSize;
+                this.inputEnd = this.dictSize;
+
+                // Adjust Hash Table Indices
+                const table = this.hashTable;
+                const len = table.length;
+                for (let i = 0; i < len; i = (i + 1) | 0) {
+                    const ref = table[i] | 0;
+                    if (ref >= shift) {
+                        table[i] = (ref - shift) | 0;
+                    } else {
+                        table[i] = -1;
+                    }
+                }
+            } else {
+                // If we flushed early (e.g. finish()) and didn't fill the block,
+                // we just move the start pointer forward for the next potential write.
+                this.inputStart = this.inputEnd;
+            }
+        }
+
+        return resultBlock;
     }
 }

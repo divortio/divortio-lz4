@@ -1,21 +1,22 @@
 import { xxHash32 } from '../xxhash32/xxhash32.js';
 import { decompressBlock } from '../block/blockDecompress.js';
 import {
-  MAGIC_NUMBER, LZ4_VERSION, BLOCK_MAX_SIZES,
+    MAGIC_NUMBER, LZ4_VERSION, BLOCK_MAX_SIZES,
     FLG_VERSION_MASK, FLG_BLOCK_CHECKSUM_MASK, FLG_CONTENT_SIZE_MASK,
     FLG_CONTENT_CHECKSUM_MASK, FLG_DICT_ID_MASK
 } from '../shared/constants.js';
-
-import {Lz4Base} from '../shared/lz4Base.js';
+import { Lz4Base } from '../shared/lz4Base.js';
 
 /**
  * Decompresses an LZ4 Frame (Synchronous).
- * **Optimization:** Uses "Hot Workspace" buffer to prevent allocation thrashing.
+ * Supports Block Dependency (Window) and External Dictionaries.
  *
  * @param {ArrayBuffer|ArrayBufferView} input - The LZ4 Frame.
+ * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary (history).
+ * @param {boolean} [verifyChecksum=true] - If false, skips content checksum verification (faster).
  * @returns {Uint8Array} Decompressed data.
  */
-export function decompressBuffer(input) {
+export function decompressBuffer(input, dictionary = null, verifyChecksum = true) {
     const data = Lz4Base.ensureBuffer(input);
     const len = data.length | 0;
     let pos = 0 | 0;
@@ -49,10 +50,15 @@ export function decompressBuffer(input) {
     if (hasContentSize) pos = (pos + 8) | 0;
     if (hasDictId) pos = (pos + 4) | 0;
 
-    // --- Optimization: Hot Workspace Buffer ---
-    const workspace = new Uint8Array(maxBlockSize);
+    // --- Optimization: Window Management ---
+    let window = dictionary instanceof Uint8Array ? dictionary : new Uint8Array(0);
+    const MAX_WINDOW_SIZE = 65536;
+
     const outputChunks = [];
     let totalOutputLen = 0 | 0;
+
+    // Workspace for block decompression
+    const workspace = new Uint8Array(maxBlockSize);
 
     // 5. Read Blocks
     while (true) {
@@ -61,8 +67,7 @@ export function decompressBuffer(input) {
         const blockSizeField = Lz4Base.readU32(data, pos);
         pos = (pos + 4) | 0;
 
-        // EndMark (0)
-        if (blockSizeField === 0) break;
+        if (blockSizeField === 0) break; // EndMark
 
         const isUncompressed = (blockSizeField & 0x80000000) !== 0;
         const blockSize = blockSizeField & 0x7FFFFFFF;
@@ -72,15 +77,37 @@ export function decompressBuffer(input) {
         const blockData = data.subarray(pos, pos + blockSize);
         pos = (pos + blockSize) | 0;
 
-        if (hasBlockChecksum) pos = (pos + 4) | 0; // Skip checksum
+        if (hasBlockChecksum) pos = (pos + 4) | 0;
+
+        let decodedChunk;
 
         if (isUncompressed) {
-            outputChunks.push(blockData);
-            totalOutputLen = (totalOutputLen + blockSize) | 0;
+            decodedChunk = blockData.slice(0);
         } else {
-            const written = decompressBlock(blockData, workspace);
-            outputChunks.push(workspace.slice(0, written));
-            totalOutputLen = (totalOutputLen + written) | 0;
+            const written = decompressBlock(blockData, workspace, window);
+            decodedChunk = workspace.slice(0, written);
+        }
+
+        outputChunks.push(decodedChunk);
+        totalOutputLen = (totalOutputLen + decodedChunk.length) | 0;
+
+        // Update Window
+        if (decodedChunk.length >= MAX_WINDOW_SIZE) {
+            window = decodedChunk.subarray(decodedChunk.length - MAX_WINDOW_SIZE);
+        } else {
+            const newWinLen = window.length + decodedChunk.length;
+            if (newWinLen <= MAX_WINDOW_SIZE) {
+                const newWin = new Uint8Array(newWinLen);
+                newWin.set(window);
+                newWin.set(decodedChunk, window.length);
+                window = newWin;
+            } else {
+                const newWin = new Uint8Array(MAX_WINDOW_SIZE);
+                const keep = MAX_WINDOW_SIZE - decodedChunk.length;
+                newWin.set(window.subarray(window.length - keep), 0);
+                newWin.set(decodedChunk, keep);
+                window = newWin;
+            }
         }
     }
 
@@ -92,7 +119,7 @@ export function decompressBuffer(input) {
         offset = (offset + outputChunks[i].length) | 0;
     }
 
-    if (hasContentChecksum) {
+    if (hasContentChecksum && verifyChecksum) {
         if ((pos + 4) > len) throw new Error("LZ4: Missing Content Checksum");
         const storedContentHash = Lz4Base.readU32(data, pos);
         const actualContentHash = xxHash32(result, 0);
