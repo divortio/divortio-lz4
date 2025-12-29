@@ -1,5 +1,5 @@
 /**
- * scheduler.js
+ * src/stream/scheduler.js
  *
  * A high-performance utility for managing event loop yielding in CPU-bound tasks.
  * Abstracts setImmediate, scheduler.postTask, and setTimeout.
@@ -16,7 +16,7 @@ const isNode = typeof process !== 'undefined' &&
 const isSchedulerAvailable = typeof scheduler !== 'undefined' &&
     typeof scheduler.postTask === 'function';
 
-// Polyfill for performance.now() if missing (e.g., very old environments)
+// Polyfill for performance.now()
 const now = (typeof performance !== 'undefined' && performance.now)
     ? () => performance.now()
     : () => Date.now();

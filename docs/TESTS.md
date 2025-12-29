@@ -46,7 +46,7 @@ Verification of the hashing algorithm required by the LZ4 Frame Specification.
 | Test File | Source File | Description |
 | --- | --- | --- |
 | [`../tests/xxhash32/xxhash32.test.mjs`](../tests/xxhash32/xxhash32.test.mjs) | [`../src/xxhash32/xxhash32.js`](../src/xxhash32/xxhash32.js) | Validates the static hash function against known test vectors (e.g., "Hello World", Empty Buffer) to ensure standard compliance. |
-| [`../tests/xxhash32/xxhash32.stream.test.mjs`](../tests/xxhash32/xxhash32.stream.test.mjs) | [`../src/xxhash32/xxhash32.stream.js`](../src/xxhash32/xxhash32.stream.js) | Ensures the streaming hasher produces the exact same output as the static hasher when data is fed in random chunks. |
+| [`../tests/xxhash32/xxhash32Stateful.test.mjs`](../tests/xxhash32/xxhash32Stateful.test.mjs) | [`../src/xxhash32/xxhash32.stream.js`](../src/xxhash32/xxhash32.stream.js) | Ensures the streaming hasher produces the exact same output as the static hasher when data is fed in random chunks. |
 
 ## 5. Compliance & Utilities
 

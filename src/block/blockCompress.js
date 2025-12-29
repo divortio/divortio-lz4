@@ -1,203 +1,150 @@
 /**
  * src/block/blockCompress.js
  * LZ4 Block Compression Kernel.
- * Optimized for V8: strict 32-bit integer math, reduced function calls, and inlined utilities.
- *
- * Implements "Prefix Mode" compression:
- * The `src` buffer is assumed to contain [Dictionary | InputBlock].
- * Compression starts at `srcStart` but matches can be found back to `srcStart - 65536`.
+ * Optimized for V8 JIT (Inlined Hash & Zero-Allocation).
  */
 
 import {
-    MIN_MATCH,
     LAST_LITERALS,
-    HASH_SEED,
-    HASH_SHIFT,
-    MAX_DISTANCE,
     MF_LIMIT,
-    HASH_TABLE_SIZE
+    HASH_TABLE_SIZE,
+    HASH_SHIFT
 } from '../shared/constants.js';
 
 /**
- * Compresses a block of data within a sliding window.
- *
- * @param {Uint8Array} src - The buffer containing history + current data.
- * @param {Uint8Array} output - The destination buffer.
- * @param {number} srcStart - The index in `src` where the current block begins.
- * @param {number} srcLen - The length of the current block to compress.
- * @param {Int32Array} hashTable - The reusable hash table (maps Hash -> Absolute Index).
- * @returns {number} The number of bytes written to output.
+ * Compresses a block of data.
+ * @param {Uint8Array} src - Input buffer.
+ * @param {Uint8Array} output - Output buffer.
+ * @param {number} srcStart - Start index.
+ * @param {number} srcLen - Length of block.
+ * @param {Uint32Array} hashTable - Hash table (1-based indexing).
+ * @returns {number} Bytes written.
  */
 export function compressBlock(src, output, srcStart, srcLen, hashTable) {
-    // Local vars for V8 Optimization
-    let inPos = srcStart | 0;
-    let outPos = 0 | 0;
-    let anchor = inPos;
+    var sIndex = srcStart | 0;
+    var sEnd = (srcStart + srcLen) | 0;
+    var mflimit = (sEnd - MF_LIMIT) | 0;
+    var matchLimit = (sEnd - LAST_LITERALS) | 0;
 
-    // The hard limit for input reading.
-    // We cannot read past (End - LAST_LITERALS).
-    const inputEnd = (srcStart + srcLen) | 0;
-    const matchLimit = (inputEnd - LAST_LITERALS) | 0;
+    var dIndex = 0 | 0;
+    var mAnchor = sIndex;
 
-    // The "Match Finder" limit.
-    // We stop searching for matches 12 bytes before the end (LAST_LITERALS + 7).
-    // This allows the inner match-check loop to read 8 bytes safely without checking bounds every byte.
-    const mfLimit = (inputEnd - MF_LIMIT) | 0;
+    // Acceleration State
+    var searchMatchCount = (1 << 6) + 3;
 
-    // Minimum index we can reference (Sliding Window of 64KB)
-    // We cannot reference data older than MAX_DISTANCE or before index 0.
-    const windowStart = Math.max(0, inPos - MAX_DISTANCE) | 0;
+    // Hash Constants
+    var HASH_MASK = (HASH_TABLE_SIZE - 1) | 0;
 
-    // Only attempt compression if we have enough data
-    if (srcLen >= MIN_MATCH) {
-        let hashPos = inPos;
+    while (sIndex < mflimit) {
+        // 1. Read Sequence
+        var seq = (src[sIndex] | (src[sIndex + 1] << 8) | (src[sIndex + 2] << 16) | (src[sIndex + 3] << 24)) | 0;
 
-        // Main Loop: Search for matches until we hit the Match Finder Limit
-        while (hashPos < mfLimit) {
-            let matchIndex = -1 | 0;
-            let offset = 0 | 0;
+        // 2. Hash (Bob Jenkins / lz4js variant inline)
+        var h = seq;
+        h = (h + 2127912214 + (h << 12)) | 0;
+        h = (h ^ -949894596 ^ (h >>> 19)) | 0;
+        h = (h + 374761393 + (h << 5)) | 0;
+        h = (h + -744332180 ^ (h << 9)) | 0;
+        h = (h + -42973499 + (h << 3)) | 0;
+        h = (h ^ -1252372727 ^ (h >>> 16)) | 0;
 
-            // 1. Hash Generation (Next 4 bytes)
-            // Manual read for performance (vs DataView)
-            const sequence = (src[hashPos] | (src[hashPos + 1] << 8) | (src[hashPos + 2] << 16) | (src[hashPos + 3] << 24)) | 0;
+        var hash = (h >>> HASH_SHIFT) & HASH_MASK;
 
-            // Math.imul is the fastest way to do 32-bit multiplication in JS
-            // (HASH_TABLE_SIZE - 1) is our mask (0x3FFF for 16KB)
-            const hash = (Math.imul(sequence, HASH_SEED) >>> HASH_SHIFT) & (HASH_TABLE_SIZE - 1);
+        // 3. Lookup
+        var mIndex = (hashTable[hash] - 1) | 0;
+        hashTable[hash] = sIndex + 1;
 
-            // 2. Lookup & Update
-            const refIndex = hashTable[hash] | 0;
-            hashTable[hash] = hashPos;
+        // 4. Test Match
+        // FIX: Added 'sIndex === mIndex' to prevent offset 0 on dirty hash tables.
+        // FIX: The shift check (offset >>> 16) > 0 handles negative offsets (-1 >>> 16 = 65535) and >64k.
+        // It does NOT catch 0.
+        if (mIndex < 0 || sIndex === mIndex || ((sIndex - mIndex) >>> 16) > 0 ||
+            (src[mIndex] | (src[mIndex + 1] << 8) | (src[mIndex + 2] << 16) | (src[mIndex + 3] << 24)) !== seq) {
 
-            // 3. Match Verification
-            // Conditions:
-            // - refIndex is valid (not -1/empty)
-            // - refIndex is within the 64KB window (refIndex >= windowStart)
-            // - refIndex is strictly before current pos
-            if (refIndex !== -1 && refIndex >= windowStart && refIndex < hashPos) {
-                // We have a candidate, check the 4-byte sequence value
-                // Safe to read here because hashPos < mfLimit ensures we are far from end
-                const refSequence = (src[refIndex] | (src[refIndex + 1] << 8) | (src[refIndex + 2] << 16) | (src[refIndex + 3] << 24)) | 0;
-
-                if (sequence === refSequence) {
-                    matchIndex = refIndex;
-                    offset = (hashPos - refIndex) | 0;
-                }
-            }
-
-            // --- MATCH FOUND ---
-            if (matchIndex > -1) {
-                // A. Encode Literals (Difference between anchor and current position)
-                const litLen = (hashPos - anchor) | 0;
-                const tokenPos = outPos++;
-
-                // Optimized Token/Length writing
-                if (litLen >= 15) {
-                    output[tokenPos] = 0xF0;
-                    let l = (litLen - 15) | 0;
-                    // Unroll 255 loop slightly? V8 handles simple loops well.
-                    while (l >= 255) {
-                        output[outPos++] = 255;
-                        l = (l - 255) | 0;
-                    }
-                    output[outPos++] = l;
-                } else {
-                    output[tokenPos] = (litLen << 4);
-                }
-
-                // Copy Literals
-                if (litLen > 0) {
-                    // .set() is faster for larger chunks, loop is faster for tiny chunks (<16)
-                    if (litLen < 16) {
-                        for (let i = 0; i < litLen; i = (i + 1) | 0) {
-                            output[outPos + i] = src[anchor + i];
-                        }
-                    } else {
-                        output.set(src.subarray(anchor, hashPos), outPos);
-                    }
-                    outPos = (outPos + litLen) | 0;
-                }
-
-                // B. Encode Match Length
-                // We already matched 4 bytes. Extend match forward.
-                let matchLen = 4 | 0;
-
-                // Max length we can check without crossing bounds
-                // Note: We use matchLimit here (LAST_LITERALS), not mfLimit.
-                // We can match up to the very last 5 bytes.
-                const maxMatch = (inputEnd - LAST_LITERALS - hashPos) | 0;
-
-                // Pointers for extension
-                const sStart = (hashPos + 4) | 0;
-                const rStart = (matchIndex + 4) | 0;
-
-                // Byte-by-byte extension check
-                // This is the hottest loop; ensure strict types.
-                while (matchLen < maxMatch && src[sStart + matchLen - 4] === src[rStart + matchLen - 4]) {
-                    matchLen = (matchLen + 1) | 0;
-                }
-
-                // C. Write Offset (Little Endian U16)
-                // Inlined for speed
-                output[outPos] = offset & 0xff;
-                output[outPos + 1] = (offset >>> 8) & 0xff;
-                outPos = (outPos + 2) | 0;
-
-                // D. Write Match Length Code
-                // The stored length is (actualLength - 4)
-                const lenCode = (matchLen - 4) | 0;
-                if (lenCode >= 15) {
-                    output[tokenPos] |= 0x0F; // Add to existing token
-                    let l = (lenCode - 15) | 0;
-                    while (l >= 255) {
-                        output[outPos++] = 255;
-                        l = (l - 255) | 0;
-                    }
-                    output[outPos++] = l;
-                } else {
-                    output[tokenPos] |= lenCode;
-                }
-
-                // E. Prepare for next iteration
-                inPos = (hashPos + matchLen) | 0;
-                anchor = inPos;
-                hashPos = inPos; // Skip hashing the bytes we just matched
-                continue;
-            }
-
-            // No match found, step forward
-            hashPos = (hashPos + 1) | 0;
+            // No Match: Accelerate
+            var mStep = (searchMatchCount++ >> 6) | 0;
+            sIndex = (sIndex + mStep) | 0;
+            continue;
         }
-        inPos = hashPos;
+
+        // --- MATCH FOUND ---
+        searchMatchCount = (1 << 6) + 3;
+
+        // 5. Encode Literals
+        var litLen = (sIndex - mAnchor) | 0;
+        var tokenPos = dIndex++;
+
+        if (litLen >= 15) {
+            output[tokenPos] = 0xF0;
+            var l = (litLen - 15) | 0;
+            while (l >= 255) {
+                output[dIndex++] = 255;
+                l = (l - 255) | 0;
+            }
+            output[dIndex++] = l;
+        } else {
+            output[tokenPos] = (litLen << 4);
+        }
+
+        var litEnd = (dIndex + litLen) | 0;
+        while (dIndex < litEnd) {
+            output[dIndex++] = src[mAnchor++];
+        }
+
+        // 6. Encode Match Length
+        var sPtr = (sIndex + 4) | 0;
+        var mPtr = (mIndex + 4) | 0;
+
+        while (sPtr < matchLimit && src[sPtr] === src[mPtr]) {
+            sPtr = (sPtr + 1) | 0;
+            mPtr = (mPtr + 1) | 0;
+        }
+
+        var matchLen = (sPtr - sIndex) | 0;
+
+        // Write Offset
+        var offset = (sIndex - mIndex) | 0;
+        output[dIndex++] = offset & 0xff;
+        output[dIndex++] = (offset >>> 8) & 0xff;
+
+        // Write Length
+        var lenCode = (matchLen - 4) | 0;
+        if (lenCode >= 15) {
+            output[tokenPos] |= 0x0F;
+            var l = (lenCode - 15) | 0;
+            while (l >= 255) {
+                output[dIndex++] = 255;
+                l = (l - 255) | 0;
+            }
+            output[dIndex++] = l;
+        } else {
+            output[tokenPos] |= lenCode;
+        }
+
+        sIndex = sPtr;
+        mAnchor = sPtr;
     }
 
     // --- Final Literals ---
-    // Write any remaining bytes from the anchor to the end of the block
-    const litLen = (inputEnd - anchor) | 0;
-    const tokenPos = outPos++;
+    var litLen = (sEnd - mAnchor) | 0;
+    var tokenPos = dIndex++;
 
     if (litLen >= 15) {
         output[tokenPos] = 0xF0;
-        let l = (litLen - 15) | 0;
+        var l = (litLen - 15) | 0;
         while (l >= 255) {
-            output[outPos++] = 255;
+            output[dIndex++] = 255;
             l = (l - 255) | 0;
         }
-        output[outPos++] = l;
+        output[dIndex++] = l;
     } else {
         output[tokenPos] = (litLen << 4);
     }
 
-    if (litLen > 0) {
-        if (litLen < 16) {
-            for (let i = 0; i < litLen; i = (i + 1) | 0) {
-                output[outPos + i] = src[anchor + i];
-            }
-        } else {
-            output.set(src.subarray(anchor, inputEnd), outPos);
-        }
-        outPos = (outPos + litLen) | 0;
+    var litEnd = (dIndex + litLen) | 0;
+    while (dIndex < litEnd) {
+        output[dIndex++] = src[mAnchor++];
     }
 
-    return outPos | 0;
+    return dIndex | 0;
 }

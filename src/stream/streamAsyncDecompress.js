@@ -1,18 +1,22 @@
 import { createDecompressStream } from "./streamDecompress.js";
 import { createTimeSlicer } from "./scheduler.js";
+import { Lz4Base } from "../shared/lz4Base.js";
 
 /**
  * Asynchronously decompresses an LZ4 Frame into raw binary data.
  * Uses "Time Slicing" to prevent blocking the main thread.
  *
- * @param {Uint8Array} input - The compressed LZ4 Frame.
+ * @param {Uint8Array|ArrayBuffer|ArrayBufferView} input - The compressed LZ4 Frame.
  * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary.
  * @param {boolean} [verifyChecksum=true] - If false, skips checksum verification.
  * @param {number} [chunkSize=524288] - Processing chunk size (default 512KB).
  * @returns {Promise<Uint8Array>} Resolved decompressed data.
  */
 export async function decompressAsync(input, dictionary = null, verifyChecksum = true, chunkSize = 524288) {
-    // 1. Initialize Stream
+    // 1. Coerce input to Uint8Array immediately
+    const rawInput = Lz4Base.ensureBuffer(input);
+
+    // 2. Initialize Stream
     const stream = createDecompressStream(dictionary, verifyChecksum);
     const reader = stream.readable.getReader();
     const writer = stream.writable.getWriter();
@@ -24,7 +28,7 @@ export async function decompressAsync(input, dictionary = null, verifyChecksum =
     const resultChunks = [];
     let totalLength = 0;
 
-    // 2. Start Reader (Parallel)
+    // 3. Start Reader (Parallel)
     const readPromise = (async () => {
         while (true) {
             const { done, value } = await reader.read();
@@ -36,13 +40,13 @@ export async function decompressAsync(input, dictionary = null, verifyChecksum =
         }
     })();
 
-    // 3. Write in Chunks (Time Sliced)
-    const len = input.byteLength;
+    // 4. Write in Chunks (Time Sliced)
+    const len = rawInput.byteLength;
     let offset = 0;
 
     while (offset < len) {
         const end = Math.min(offset + chunkSize, len);
-        const chunk = input.subarray(offset, end);
+        const chunk = rawInput.subarray(offset, end);
 
         // Write chunk
         await writer.write(chunk);
@@ -53,11 +57,11 @@ export async function decompressAsync(input, dictionary = null, verifyChecksum =
         offset = end;
     }
 
-    // 4. Finalize
+    // 5. Finalize
     await writer.close();
     await readPromise;
 
-    // 5. Merge
+    // 6. Merge Results
     const result = new Uint8Array(totalLength);
     let pos = 0;
     for (const chunk of resultChunks) {

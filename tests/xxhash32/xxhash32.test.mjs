@@ -2,20 +2,19 @@ import { it, describe } from 'node:test';
 import assert from 'node:assert';
 import { xxHash32 } from '../../src/xxhash32/xxhash32.js';
 
-describe('xxHash32 (Unit)', () => {
+describe('xxHash32 (Stateless)', () => {
     // Known test vectors for xxHash32
     // Reference: https://code.google.com/p/xxhash/
 
     it('should hash empty buffer correctly (Seed 0)', () => {
         const input = new Uint8Array(0);
         const result = xxHash32(input, 0);
+        // Standard xxHash32 output for empty buffer with seed 0
         assert.strictEqual(result, 0x02CC5D05);
     });
 
     it('should hash "Hello World" correctly (Seed 0)', () => {
         const input = new TextEncoder().encode("Hello World");
-        // Computed via generic xxHash32 tools
-        // Verify this value against standard implementation output
         const result = xxHash32(input, 0);
         // 0xB1FD16EE is standard for "Hello World" seed 0
         assert.strictEqual(result >>> 0, 0xB1FD16EE);
@@ -32,7 +31,9 @@ describe('xxHash32 (Unit)', () => {
         // Create a buffer > 16 bytes to trigger the loop
         const buffer = new Uint8Array(100).fill(0xAA);
         const result = xxHash32(buffer, 0);
-        // Deterministic check
+
+        // Deterministic check: result must be a positive 32-bit integer
         assert.ok(typeof result === 'number');
+        assert.ok(result >= 0 && result <= 0xFFFFFFFF);
     });
 });

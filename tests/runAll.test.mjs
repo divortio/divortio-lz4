@@ -16,7 +16,7 @@ import './utils.mjs';
 
 // --- 2. Primitives ---
 import './xxhash32/xxhash32.test.mjs';
-import './xxhash32/xxhash32.stream.test.mjs';
+import './xxhash32/xxhash32Stateful.test.mjs';
 
 // --- 3. Shared Logic ---
 import './shared/lz4Base.test.mjs';

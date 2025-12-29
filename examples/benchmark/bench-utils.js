@@ -50,6 +50,8 @@ export function measure(label, fn, inputSize) {
     // 3. Measurement (Run Samples)
     // We run 5 samples of 'count' iterations each
     const samples = [];
+    let outputSize = 0;
+
     for (let i = 0; i < 5; i++) {
         const start = performance.now();
         const result = fn(); // Capture result of last run for size check
@@ -66,7 +68,7 @@ export function measure(label, fn, inputSize) {
 
         // Store size from first run
         if (i === 0) {
-            var outputSize = result ? (result.byteLength || result.length) : 0;
+            outputSize = result ? (result.byteLength || result.length) : 0;
         }
     }
 
@@ -80,12 +82,32 @@ export function measure(label, fn, inputSize) {
     const timePerOpMs = ((inputSize / 1024 / 1024) / avgMbps) * 1000;
 
     return {
-        engine: label,
+        name: label, // Normalized to 'name' for consistency
+        engine: label, // Keeping 'engine' for backward compat in table
         timeMs: timePerOpMs,
         sizeBytes: outputSize,
         throughput: avgMbps,
         ratio: outputSize ? (outputSize / inputSize * 100) : 0
     };
+}
+
+// --- Comparison Matrix ---
+export function printComparisonMatrix(results) {
+    console.log(`\n>> Relative Speed Matrix (Row is X times faster than Column)`);
+
+    // Create an object where keys are row headers
+    const matrix = {};
+
+    results.forEach(row => {
+        matrix[row.name] = {};
+        results.forEach(col => {
+            // Calculate relative speed (Row Throughput / Col Throughput)
+            const relativeSpeed = row.throughput / col.throughput;
+            matrix[row.name][col.name] = relativeSpeed.toFixed(2) + 'x';
+        });
+    });
+
+    console.table(matrix);
 }
 
 // --- Reporting ---
@@ -108,4 +130,7 @@ export function printResults(title, results) {
     const speedup = (winner.throughput / loser.throughput).toFixed(1);
 
     console.log(`>> Winner: ${winner.engine} is ${speedup}x faster than ${loser.engine}`);
+
+    // Print the matrix after the main table
+    printComparisonMatrix(results);
 }

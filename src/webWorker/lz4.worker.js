@@ -9,8 +9,8 @@
  * 2. Stream Mode: Async piping for Readable/Writable streams (Low memory).
  *
  * OPTIMIZATIONS:
- * - Transferable Objects (Zero-Copy)
- * - SharedArrayBuffer Support
+ * - Transferable Objects (Zero-Copy Return)
+ * - SharedArrayBuffer Support (Zero-Copy Input)
  */
 
 import { compressBuffer } from '../buffer/bufferCompress.js';
@@ -19,10 +19,7 @@ import { createCompressStream } from '../stream/streamCompress.js';
 import { createDecompressStream } from '../stream/streamDecompress.js';
 
 // --- TYPE FIX ---
-// We cast 'self' to DedicatedWorkerGlobalScope to fix IDE warnings.
-// The IDE defaults to 'Window', which expects postMessage(msg, targetOrigin, transfer).
-// Workers expect postMessage(msg, transfer).
-
+// Cast 'self' to DedicatedWorkerGlobalScope to enable transfer list TS checks.
 /** @type {DedicatedWorkerGlobalScope} */
 // @ts-ignore
 const workerSelf = self;
@@ -35,6 +32,7 @@ workerSelf.onmessage = async (event) => {
 
     try {
         // --- 1. STREAM MODE ---
+        // Streams are transferred, so we process them directly.
         if (task === 'stream-compress') {
             const { dictionary, maxBlockSize, blockIndependence, contentChecksum } = options || {};
 
@@ -70,6 +68,7 @@ workerSelf.onmessage = async (event) => {
         }
 
         // --- 2. BUFFER MODE ---
+        // 'buffer' is either an ArrayBuffer (cloned) or SharedArrayBuffer (shared).
         const inputData = new Uint8Array(buffer);
         let resultTypedArray;
 
@@ -87,13 +86,13 @@ workerSelf.onmessage = async (event) => {
 
         const resultBuffer = resultTypedArray.buffer;
 
-        // Note: Standard ArrayBuffers are transferred (moved).
-        // SharedArrayBuffers are copied (cloned).
+        // Optimization: Zero-Copy Return
+        // We transfer the result buffer back to the main thread.
+        // Note: SharedArrayBuffers cannot be transferred.
         const transferList = (resultBuffer instanceof ArrayBuffer && !(resultBuffer instanceof SharedArrayBuffer))
             ? [resultBuffer]
             : [];
 
-        // Correct Worker Syntax: postMessage(message, transferList)
         workerSelf.postMessage({
             id,
             status: 'success',

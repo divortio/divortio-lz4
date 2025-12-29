@@ -1,7 +1,14 @@
+/**
+ * src/shared/typeHandling.js
+ * High-level helpers for String and JSON Object compression.
+ * Wrapper around the Buffer-level API.
+ */
+
 import { compressBuffer } from '../buffer/bufferCompress.js';
 import { decompressBuffer } from '../buffer/bufferDecompress.js';
 
 // Cached instances to reduce garbage collection overhead
+// Note: TextEncoder/Decoder are native globals in Node 11+ and modern browsers.
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -11,12 +18,13 @@ const textDecoder = new TextDecoder();
  *
  * @param {string} str - The string to compress.
  * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary.
- * @param {number} [maxBlockSize=65536] - Target block size (default 64KB).
+ * @param {number} [maxBlockSize=4194304] - Target block size (default 4MB).
  * @param {boolean} [blockIndependence=false] - If false, blocks can match previous blocks (better ratio).
  * @param {boolean} [contentChecksum=false] - If true, appends xxHash32 (slower).
  * @returns {Uint8Array} The compressed LZ4 frame.
  */
-export function compressString(str, dictionary = null, maxBlockSize = 65536, blockIndependence = false, contentChecksum = false) {
+export function compressString(str, dictionary = null, maxBlockSize = 4194304, blockIndependence = false, contentChecksum = false) {
+    // encode() always returns a Uint8Array
     const rawBytes = textEncoder.encode(str);
     return compressBuffer(rawBytes, dictionary, maxBlockSize, blockIndependence, contentChecksum);
 }
@@ -41,13 +49,18 @@ export function decompressString(compressedData, dictionary = null, verifyChecks
  *
  * @param {Object|Array|number|boolean} obj - The object to serialize and compress.
  * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary.
- * @param {number} [maxBlockSize=65536] - Target block size.
+ * @param {number} [maxBlockSize=4194304] - Target block size. Default 4MB
  * @param {boolean} [blockIndependence=false] - If false, blocks can match previous blocks.
  * @param {boolean} [contentChecksum=false] - If true, appends xxHash32.
  * @returns {Uint8Array} The compressed LZ4 frame.
  */
-export function compressObject(obj, dictionary = null, maxBlockSize = 65536, blockIndependence = false, contentChecksum = false) {
+export function compressObject(obj, dictionary = null, maxBlockSize = 4194304, blockIndependence = false, contentChecksum = false) {
     const jsonStr = JSON.stringify(obj);
+
+    if (jsonStr === undefined) {
+        throw new Error("LZ4: Input cannot be serialized to JSON (undefined or invalid type)");
+    }
+
     const rawBytes = textEncoder.encode(jsonStr);
     return compressBuffer(rawBytes, dictionary, maxBlockSize, blockIndependence, contentChecksum);
 }

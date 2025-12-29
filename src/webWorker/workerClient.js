@@ -17,6 +17,8 @@ let messageIdCounter = 0;
 
 /**
  * Map to correlate Worker responses back to their specific Promises.
+ * Key: Message ID
+ * Value: { resolve, reject }
  */
 const pendingTasks = new Map();
 
@@ -25,12 +27,8 @@ const pendingTasks = new Map();
  */
 function getWorker() {
     if (!workerInstance) {
-        // Feature Detection
-        if (!window.crossOriginIsolated) {
-            console.warn("[LZ4] Info: SharedArrayBuffer unavailable (COOP/COEP headers missing). Large buffer operations may copy memory.");
-        }
-
         // Initialize Worker
+        // Note: Bundlers (Vite/Webpack) usually detect this pattern automatically.
         workerInstance = new Worker(new URL('./lz4.worker.js', import.meta.url), {
             type: 'module',
             name: 'LZ4-Worker'
@@ -43,7 +41,7 @@ function getWorker() {
             if (taskResolver) {
                 if (status === 'success') {
                     // For Buffer tasks: resolve with the data
-                    // For Stream tasks: resolve void (completion signal)
+                    // For Stream tasks: resolve undefined (void signal)
                     const result = buffer ? new Uint8Array(buffer) : undefined;
                     taskResolver.resolve(result);
                 } else {
@@ -71,20 +69,15 @@ function runBufferTask(task, data, options = {}) {
     return new Promise((resolve, reject) => {
         pendingTasks.set(id, { resolve, reject });
 
-        let transferBuffer = data.buffer;
+        // Input Handling:
+        // We pass the buffer directly.
+        // 1. If it's a standard ArrayBuffer, browser Structure Clones it (Copy).
+        // 2. If it's a SharedArrayBuffer, browser shares it (Zero-Copy).
+        //
+        // Note: We do NOT transfer input buffers by default because it would
+        // detach them in the main thread, crashing user apps that reuse buffers.
 
-        // Optimization: Use SharedArrayBuffer if available/possible
-        if (window.crossOriginIsolated) {
-            if (data.buffer instanceof SharedArrayBuffer) {
-                transferBuffer = data.buffer;
-            } else {
-                try {
-                    const sab = new SharedArrayBuffer(data.byteLength);
-                    new Uint8Array(sab).set(data);
-                    transferBuffer = sab;
-                } catch (e) { /* Fallback */ }
-            }
-        }
+        const transferBuffer = data.buffer || data;
 
         worker.postMessage({
             id,

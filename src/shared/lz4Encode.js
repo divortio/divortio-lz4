@@ -1,225 +1,235 @@
 /**
- * @fileoverview Stateful LZ4 Encoder for streaming compression.
- * Optimized for Sliding Window (Lookback) and External Dictionaries.
- *
- * @module shared/lz4Encode
+ * src/shared/lz4Encode.js
+ * Stateful LZ4 Encoder for streaming compression.
+ * Optimized to match blockCompress.js hash logic.
  */
 
-import { XXHash32Stream } from "../xxhash32/xxhash32.stream.js";
+import { XXHash32 } from "../xxhash32/xxhash32Stateful.js";
 import { compressBlock } from "../block/blockCompress.js";
 import { Lz4Base } from "./lz4Base.js";
 import {
     BLOCK_MAX_SIZES,
-    DICT_SIZE,
     HASH_TABLE_SIZE,
-    MIN_MATCH
+    MIN_MATCH,
+    HASH_SHIFT
 } from "./constants.js";
 
-export class LZ4Encoder extends Lz4Base {
-
+export class LZ4Encoder {
     /**
-     * @param {Uint8Array|null} [dictionary=null] - Initial dictionary/history context.
-     * @param {number} [maxBlockSize=65536] - Target block size.
-     * @param {boolean} [blockIndependence=false] - If false, matches can cross block boundaries.
-     * @param {boolean} [contentChecksum=false] - If true, appends xxHash32 of original content.
+     * @param {Uint8Array|null} [dictionary=null]
+     * @param {number} [maxBlockSize=4194304] - Default 4MB
+     * @param {boolean} [blockIndependence=false]
+     * @param {boolean} [contentChecksum=false]
      */
-    constructor(dictionary = null, maxBlockSize = 65536, blockIndependence = false, contentChecksum = false) {
-        super();
+    constructor(dictionary = null, maxBlockSize = 4194304, blockIndependence = false, contentChecksum = false) {
         this.blockIndependence = blockIndependence;
         this.contentChecksum = contentChecksum;
         this.bdId = Lz4Base.getBlockId(maxBlockSize);
-        this.maxBlockSize = BLOCK_MAX_SIZES[this.bdId];
+        this.blockSize = BLOCK_MAX_SIZES[this.bdId];
 
-        // --- Memory Management ---
-        // Window = [Dictionary Space (64KB)] + [Current Block Space (MaxBlockSize)]
-        this.dictSize = DICT_SIZE; // 64KB
-        this.windowSize = this.dictSize + this.maxBlockSize;
-        this.window = new Uint8Array(this.windowSize);
+        this.maxWindowSize = 65536;
+        this.bufferCapacity = this.maxWindowSize + this.blockSize + 4096;
+        this.buffer = new Uint8Array(this.bufferCapacity);
 
-        // --- Resources ---
-        // Hash Table for match finding (16KB size for 64KB window)
-        this.hashTable = new Int32Array(HASH_TABLE_SIZE);
-        this.hashTable.fill(-1);
+        // OPTIMIZATION: Use Uint32Array to match blockCompress.js
+        this.hashTable = new Uint32Array(HASH_TABLE_SIZE);
 
-        this.checksumStream = this.contentChecksum ? new XXHash32Stream(0) : null;
+        this.hasher = this.contentChecksum ? new XXHash32(0) : null;
         this.hasWrittenHeader = false;
+        this.isClosed = false;
 
-        // --- Dictionary Initialization ---
-        // We start writing new data at `dictSize`.
-        this.inputStart = this.dictSize;
-        this.inputEnd = this.dictSize;
+        this.inputPos = 0;
+        this.dictSize = 0;
+        this.dictId = null;
 
         if (dictionary && dictionary.length > 0) {
             this._initDictionary(dictionary);
         }
-
-        // Output Scratch Buffer (Worst case expansion)
-        const worstCase = (this.maxBlockSize + (this.maxBlockSize / 255 | 0) + 32) | 0;
-        this.outputBuffer = new Uint8Array(worstCase);
     }
 
-    /**
-     * Loads the dictionary into the window and "warms up" the hash table.
-     * @private
-     */
     _initDictionary(dict) {
-        // We only care about the last 64KB of the dictionary
-        let len = dict.length;
-        let offset = 0;
+        const d = Lz4Base.ensureBuffer(dict);
 
-        if (len > this.dictSize) {
-            offset = len - this.dictSize;
-            len = this.dictSize;
-        }
+        // Calculate DictID (Standard xxHash32)
+        const dictHasher = new XXHash32(0);
+        dictHasher.update(d);
+        this.dictId = dictHasher.digest();
 
-        // 1. Copy into the "Dictionary Space" of the window (0..64KB)
-        // We place it at the *end* of the dictionary space so it matches
-        // the sliding window logic (data is always immediately before inputStart).
-        const destStart = this.dictSize - len;
-        this.window.set(dict.subarray(offset, offset + len), destStart);
+        const len = d.length;
+        const windowSize = Math.min(len, this.maxWindowSize);
+        const offset = len - windowSize;
 
-        // 2. Warm up the Hash Table
-        // We must hash these bytes so the compressor can find matches within them.
-        const end = this.dictSize - MIN_MATCH;
-        const base = this.window;
+        // Copy into buffer
+        this.buffer.set(d.subarray(offset, len), 0);
+        this.inputPos = windowSize;
+        this.dictSize = windowSize;
+
+        // Warm hash table
+        // CRITICAL FIX: Must use the EXACT same hash algorithm as blockCompress.js
+        const end = windowSize - MIN_MATCH;
+        const base = this.buffer;
         const table = this.hashTable;
+        const HASH_MASK = (HASH_TABLE_SIZE - 1) | 0;
 
-        // Rolling hash insert
-        for (let i = destStart; i <= end; i++) {
-            // FIX: Use Little Endian sequence generation to match compressBlock
-            // Old (Bug): (base[i] << 24) | ...
+        for (let i = 0; i <= end; i++) {
+            // 1. Read Sequence
             const seq = (base[i] | (base[i + 1] << 8) | (base[i + 2] << 16) | (base[i + 3] << 24));
 
-            // Multiplicative hash (LZ4 standard)
-            const hash = (Math.imul(seq, 0x9E3779B1) >>> (32 - 14)) & (HASH_TABLE_SIZE - 1);
-            table[hash] = i;
+            // 2. Hash (Bob Jenkins / lz4js variant inline)
+            var h = seq;
+            h = (h + 2127912214 + (h << 12)) | 0;
+            h = (h ^ -949894596 ^ (h >>> 19)) | 0;
+            h = (h + 374761393 + (h << 5)) | 0;
+            h = (h + -744332180 ^ (h << 9)) | 0;
+            h = (h + -42973499 + (h << 3)) | 0;
+            h = (h ^ -1252372727 ^ (h >>> 16)) | 0;
+
+            const hash = (h >>> HASH_SHIFT) & HASH_MASK;
+
+            // 3. Store (1-based index)
+            table[hash] = i + 1;
         }
     }
 
-    /**
-     * Processes a chunk of raw data.
-     * @param {Uint8Array} chunk
-     * @returns {Uint8Array[]}
-     */
     update(chunk) {
-        const output = [];
+        if (this.isClosed) throw new Error("LZ4: Encoder closed");
+        const frames = [];
 
         if (!this.hasWrittenHeader) {
-            output.push(Lz4Base.createFrameHeader(this.blockIndependence, this.contentChecksum, this.bdId));
+            frames.push(Lz4Base.createFrameHeader(
+                this.blockIndependence,
+                this.contentChecksum,
+                this.bdId,
+                this.dictId
+            ));
             this.hasWrittenHeader = true;
         }
 
-        if (this.checksumStream) this.checksumStream.update(chunk);
+        if (this.hasher) this.hasher.update(chunk);
 
-        let chunkOffset = 0;
-        let chunkRemaining = chunk.length;
+        let srcIdx = 0;
+        const srcLen = chunk.byteLength;
 
-        while (chunkRemaining > 0) {
-            // Space remaining in the "Current Block" section of the window
-            const spaceInBlock = (this.windowSize - this.inputEnd) | 0;
+        while (srcIdx < srcLen) {
+            const spaceAvailable = this.bufferCapacity - this.inputPos;
+            const copyLen = Math.min(spaceAvailable, srcLen - srcIdx);
 
-            const toCopy = (chunkRemaining < spaceInBlock) ? chunkRemaining : spaceInBlock;
+            this.buffer.set(chunk.subarray(srcIdx, srcIdx + copyLen), this.inputPos);
+            this.inputPos += copyLen;
+            srcIdx += copyLen;
 
-            this.window.set(chunk.subarray(chunkOffset, chunkOffset + toCopy), this.inputEnd);
-
-            this.inputEnd += toCopy;
-            chunkOffset += toCopy;
-            chunkRemaining -= toCopy;
-
-            if (this.inputEnd === this.windowSize) {
-                output.push(this._flushBlock());
+            const newDataLen = this.inputPos - this.dictSize;
+            if (newDataLen >= this.blockSize) {
+                frames.push(this._flushBlock(false));
             }
         }
-        return output;
+
+        return frames;
     }
 
-    finish() {
-        const output = [];
-        if (!this.hasWrittenHeader) {
-            output.push(Lz4Base.createFrameHeader(this.blockIndependence, this.contentChecksum, this.bdId));
-            this.hasWrittenHeader = true;
-        }
+    _flushBlock(isFinal) {
+        const srcStart = this.dictSize;
+        const totalLen = this.inputPos;
+        const dataLen = totalLen - srcStart;
 
-        if (this.inputEnd > this.inputStart) {
-            output.push(this._flushBlock());
-        }
+        if (dataLen === 0 && !isFinal) return new Uint8Array(0);
+        if (dataLen === 0 && isFinal) return this._createEndMark();
 
-        // EndMark
-        const endMark = new Uint8Array(4);
-        output.push(endMark);
+        const sizeToCompress = isFinal ? dataLen : this.blockSize;
 
-        // Content Checksum
-        if (this.checksumStream) {
-            const buf = new Uint8Array(4);
-            Lz4Base.writeU32(buf, this.checksumStream.finalize(), 0);
-            output.push(buf);
-        }
-        return output;
-    }
+        const worstCase = sizeToCompress + (sizeToCompress / 255 | 0) + 64;
+        const output = new Uint8Array(4 + worstCase);
 
-    _flushBlock() {
-        const srcLen = (this.inputEnd - this.inputStart) | 0;
-
-        // 1. Compress
-        // inputStart is where the *new* data began (usually 65536).
-        // The compressor looks at window[0...inputStart] as valid dictionary history.
-        const dest = this.outputBuffer.subarray(4);
-        const compSize = compressBlock(this.window, dest, this.inputStart, srcLen, this.hashTable);
+        const compSize = compressBlock(
+            this.buffer,
+            output.subarray(4),
+            srcStart,
+            sizeToCompress,
+            this.hashTable
+        );
 
         let resultBlock;
 
-        // 2. Decision: Compressed vs Uncompressed
-        if (compSize > 0 && compSize < srcLen) {
-            const header = new Uint8Array(4);
-            Lz4Base.writeU32(header, compSize, 0);
-            resultBlock = new Uint8Array(4 + compSize);
-            resultBlock.set(header, 0);
-            resultBlock.set(dest.subarray(0, compSize), 4);
+        if (compSize > 0 && compSize < sizeToCompress) {
+            Lz4Base.writeU32(output, compSize, 0);
+            resultBlock = output.subarray(0, 4 + compSize);
         } else {
-            const header = new Uint8Array(4);
-            Lz4Base.writeU32(header, srcLen | 0x80000000, 0);
-            resultBlock = new Uint8Array(4 + srcLen);
-            resultBlock.set(header, 0);
-            resultBlock.set(this.window.subarray(this.inputStart, this.inputEnd), 4);
+            Lz4Base.writeU32(output, sizeToCompress | 0x80000000, 0);
+            output.set(this.buffer.subarray(srcStart, srcStart + sizeToCompress), 4);
+            resultBlock = output.subarray(0, 4 + sizeToCompress);
         }
 
-        // 3. Slide Window
+        const bytesCompressed = sizeToCompress;
+        const bytesEnd = srcStart + bytesCompressed;
+
         if (this.blockIndependence) {
-            this.inputEnd = this.inputStart;
-            this.hashTable.fill(-1);
-            // Re-initialize pointers for a fresh block (optional but cleaner)
-            this.inputStart = this.dictSize;
-            this.inputEnd = this.dictSize;
-        } else {
-            // Dependent Blocks: Shift data back to keep history
-            if (this.inputEnd > this.dictSize) {
-                const shift = (this.inputEnd - this.dictSize) | 0;
-
-                // Shift window content
-                this.window.copyWithin(0, shift, this.inputEnd);
-
-                // Adjust Pointers
-                this.inputStart = this.dictSize;
-                this.inputEnd = this.dictSize;
-
-                // Adjust Hash Table Indices
-                const table = this.hashTable;
-                const len = table.length;
-                for (let i = 0; i < len; i = (i + 1) | 0) {
-                    const ref = table[i] | 0;
-                    if (ref >= shift) {
-                        table[i] = (ref - shift) | 0;
-                    } else {
-                        table[i] = -1;
-                    }
-                }
+            const leftovers = this.inputPos - bytesEnd;
+            if (leftovers > 0) {
+                this.buffer.copyWithin(0, bytesEnd, this.inputPos);
+                this.inputPos = leftovers;
             } else {
-                // If we flushed early (e.g. finish()) and didn't fill the block,
-                // we just move the start pointer forward for the next potential write.
-                this.inputStart = this.inputEnd;
+                this.inputPos = 0;
+            }
+            this.dictSize = 0;
+            this.hashTable.fill(0);
+        } else {
+            // Dependent Blocks: Shift window and adjust hash table
+            const preserveLen = Math.min(this.maxWindowSize, bytesEnd);
+            const shiftSrc = bytesEnd - preserveLen;
+            const lenToMove = this.inputPos - shiftSrc;
+
+            this.buffer.copyWithin(0, shiftSrc, this.inputPos);
+
+            this.inputPos = lenToMove;
+            this.dictSize = preserveLen;
+
+            const table = this.hashTable;
+            const shift = shiftSrc;
+
+            // Adjust hash table indices
+            // 1-based indexing: if (ref > shift) newRef = ref - shift;
+            for (let i = 0; i < HASH_TABLE_SIZE; i++) {
+                const ref = table[i];
+                if (ref > shift) {
+                    table[i] = ref - shift;
+                } else {
+                    table[i] = 0;
+                }
             }
         }
 
         return resultBlock;
+    }
+
+    _createEndMark() {
+        const b = new Uint8Array(4);
+        Lz4Base.writeU32(b, 0, 0);
+        return b;
+    }
+
+    finish() {
+        if (this.isClosed) return [];
+        this.isClosed = true;
+
+        const frames = [];
+
+        if (!this.hasWrittenHeader) {
+            frames.push(Lz4Base.createFrameHeader(this.blockIndependence, this.contentChecksum, this.bdId, this.dictId));
+        }
+
+        while ((this.inputPos - this.dictSize) > 0) {
+            frames.push(this._flushBlock(true));
+        }
+
+        frames.push(this._createEndMark());
+
+        if (this.contentChecksum && this.hasher) {
+            const digest = this.hasher.digest();
+            const b = new Uint8Array(4);
+            Lz4Base.writeU32(b, digest, 0);
+            frames.push(b);
+        }
+
+        return frames;
     }
 }

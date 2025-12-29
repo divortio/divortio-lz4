@@ -1,5 +1,6 @@
 /**
- * @fileoverview Stateful LZ4 Decoder for streaming decompression.
+ * src/shared/lz4Decode.js
+ * Stateful LZ4 Decoder for streaming decompression.
  * Aligned with LZ4 Frame Format 1.6.1.
  * Optimized with Integer States and Window support.
  *
@@ -7,19 +8,18 @@
  */
 
 import {
-    BLOCK_MAX_SIZES,
+    FLG_BLOCK_INDEP_MASK,
     FLG_BLOCK_CHECKSUM_MASK,
-    FLG_CONTENT_CHECKSUM_MASK,
     FLG_CONTENT_SIZE_MASK,
+    FLG_CONTENT_CHECKSUM_MASK,
     FLG_DICT_ID_MASK,
     MAGIC_NUMBER
 } from "./constants.js";
-import { xxHash32 } from "../xxhash32/xxhash32.js";
-import { XXHash32Stream } from "../xxhash32/xxhash32.stream.js";
+import { XXHash32 } from "../xxhash32/xxhash32Stateful.js";
 import { decompressBlock } from "../block/blockDecompress.js";
 import { Lz4Base } from "./lz4Base.js";
 
-// --- Optimization: Integer States (vs String Literals) ---
+// --- State Machine ---
 const STATES = {
     MAGIC: 0,
     HEADER: 1,
@@ -28,232 +28,274 @@ const STATES = {
     CHECKSUM: 4
 };
 
-export class LZ4Decoder extends Lz4Base {
+export class LZ4Decoder {
 
     /**
      * Creates a stateful LZ4 Decoder.
-     *
      * @param {Uint8Array|null} [dictionary=null] - Initial history window (optional).
      * @param {boolean} [verifyChecksum=true] - If false, skips content checksum verification for speed.
      */
     constructor(dictionary = null, verifyChecksum = true) {
-        super();
-        this.buffer = new Uint8Array(0); // Input buffer
-        this.state = STATES.MAGIC;       // Current State
-        this.checksumStream = null;
+        this.state = STATES.MAGIC;
 
-        // Configuration
+        // User Options
+        this.dictionary = dictionary ? Lz4Base.ensureBuffer(dictionary) : null;
         this.verifyChecksum = verifyChecksum;
 
-        // --- History Window / Dictionary ---
-        // We store the initial dictionary to reset the window correctly
-        // if the stream contains concatenated frames.
-        this.initialDictionary = dictionary instanceof Uint8Array ? dictionary : new Uint8Array(0);
-
-        // Active Window (starts as a copy of the dictionary)
-        this.window = this.initialDictionary.slice(0);
-        this.maxWindowSize = 65536; // 64KB Standard LZ4 Window
-
-        // Frame Config (Parsed from Header)
-        this.maxBlockSize = 65536;
+        // Frame Flags
+        this.blockIndependence = true;
         this.hasBlockChecksum = false;
         this.hasContentChecksum = false;
-        this.dictId = null;
+        this.hasContentSize = false;
+        this.hasDictId = false;
 
-        // Current Block Vars
+        // Runtime State
+        this.buffer = new Uint8Array(0); // Accumulator for incoming chunks
+        this.hasher = null;              // Content Checksum Calculator
         this.currentBlockSize = 0;
         this.isUncompressed = false;
 
-        // Pre-allocate Workspace
-        this.workspace = new Uint8Array(0);
+        // Window (History) - Max 64KB
+        // We use a "Sliding Window" buffer that shifts data to the left when full.
+        this.windowSize = 65536;
+        this.window = new Uint8Array(this.windowSize);
+        this.windowPos = 0; // Current write position (also indicates valid history length)
+
+        // Initialize Window with Dictionary if provided
+        // (Note: This may be validated against DictID in the header later)
+        if (this.dictionary) {
+            this._initWindow(this.dictionary);
+        }
+
+        // Workspace for block decompression (Max 4MB Block)
+        // Pre-allocated to prevent Garbage Collection thrashing during streams
+        this.workspace = new Uint8Array(4 * 1024 * 1024);
+    }
+
+    _initWindow(dict) {
+        const len = dict.length;
+        const size = Math.min(len, this.windowSize);
+        // Load the last 64KB of the dictionary into the window
+        this.window.set(dict.subarray(len - size), 0);
+        this.windowPos = size;
     }
 
     /**
-     * Helper to append data to the sliding window (History).
-     * Keeps the window size capped at 64KB.
-     * @param {Uint8Array} data
-     */
-    _updateWindow(data) {
-        // If data itself is larger than window, we only need the tail
-        if (data.length >= this.maxWindowSize) {
-            this.window = data.subarray(data.length - this.maxWindowSize);
-            return;
-        }
-
-        const combinedLen = this.window.length + data.length;
-        if (combinedLen <= this.maxWindowSize) {
-            // Fast path: just append
-            const newWin = new Uint8Array(combinedLen);
-            newWin.set(this.window);
-            newWin.set(data, this.window.length);
-            this.window = newWin;
-        } else {
-            // Trim: Keep tail of (Window + Data)
-            const keepFromOld = this.maxWindowSize - data.length;
-            const newWin = new Uint8Array(this.maxWindowSize);
-            newWin.set(this.window.subarray(this.window.length - keepFromOld), 0);
-            newWin.set(data, keepFromOld);
-            this.window = newWin;
-        }
-    }
-
-    /**
+     * Adds data to the decoder.
      * @param {Uint8Array} chunk
-     * @returns {Uint8Array[]} Array of decompressed blocks
+     * @returns {Uint8Array[]} Decoded chunks
      */
     update(chunk) {
-        if (!chunk || chunk.length === 0) return [];
-
-        // Efficient Buffer Appending (Input Queue)
-        if (this.buffer.length === 0) {
-            this.buffer = chunk;
-        } else {
+        // 1. Accumulate Input
+        if (this.buffer.length > 0) {
             const newBuf = new Uint8Array(this.buffer.length + chunk.length);
             newBuf.set(this.buffer);
             newBuf.set(chunk, this.buffer.length);
             this.buffer = newBuf;
+        } else {
+            this.buffer = chunk;
         }
 
         const output = [];
 
+        // 2. State Machine Loop
         while (true) {
-            // --- 1. MAGIC NUMBER ---
+
+            // --- STATE: MAGIC NUMBER (4 bytes) ---
             if (this.state === STATES.MAGIC) {
                 if (this.buffer.length < 4) break;
+
                 if (Lz4Base.readU32(this.buffer, 0) !== MAGIC_NUMBER) {
-                    throw new Error("LZ4: Invalid Magic Number.");
+                    throw new Error("LZ4: Invalid Magic Number");
                 }
+
                 this.buffer = this.buffer.subarray(4);
                 this.state = STATES.HEADER;
+
+                // Reset per-frame state
+                this.hasher = this.verifyChecksum ? new XXHash32(0) : null;
             }
 
-            // --- 2. FRAME HEADER ---
+            // --- STATE: FRAME HEADER (2-15 bytes) ---
             if (this.state === STATES.HEADER) {
-                // Min header: FLG(1) + BD(1) + HC(1) = 3 bytes
-                if (this.buffer.length < 3) break;
+                // Need at least 2 bytes for Flags (FLG) and Block Descriptor (BD)
+                if (this.buffer.length < 2) break;
 
                 const flg = this.buffer[0];
-                const bd = this.buffer[1];
 
-                // Calculate variable size
-                let headerSize = 3;
-                if (flg & FLG_CONTENT_SIZE_MASK) headerSize += 8;
-                if (flg & FLG_DICT_ID_MASK) headerSize += 4;
-
-                if (this.buffer.length < headerSize) break;
-
-                // Validate Header Checksum
-                const storedHc = this.buffer[headerSize - 1];
-                const computedHc = (xxHash32(this.buffer.subarray(0, headerSize - 1), 0) >>> 8) & 0xFF;
-                if (storedHc !== computedHc) throw new Error("LZ4: Header Checksum Error");
-
-                // Parse
-                this.hasContentChecksum = (flg & FLG_CONTENT_CHECKSUM_MASK) !== 0;
+                // Parse Flags
+                this.blockIndependence = (flg & FLG_BLOCK_INDEP_MASK) !== 0;
                 this.hasBlockChecksum = (flg & FLG_BLOCK_CHECKSUM_MASK) !== 0;
-                this.maxBlockSize = BLOCK_MAX_SIZES[(bd & 0x70) >> 4] || 65536;
+                this.hasContentSize = (flg & FLG_CONTENT_SIZE_MASK) !== 0;
+                this.hasContentChecksum = (flg & FLG_CONTENT_CHECKSUM_MASK) !== 0;
+                this.hasDictId = (flg & FLG_DICT_ID_MASK) !== 0;
 
-                // Read Dict ID
-                if (flg & FLG_DICT_ID_MASK) {
-                    const offset = (flg & FLG_CONTENT_SIZE_MASK) ? 10 : 2;
-                    this.dictId = Lz4Base.readU32(this.buffer, offset);
+                // Calculate variable header length
+                let requiredLen = 2;
+                if (this.hasContentSize) requiredLen += 8;
+                if (this.hasDictId) requiredLen += 4;
+                requiredLen += 1; // Header Checksum
+
+                if (this.buffer.length < requiredLen) break;
+
+                // Parsing Dictionary ID (if present)
+                let cursor = 2;
+                if (this.hasContentSize) cursor += 8;
+
+                if (this.hasDictId) {
+                    const expectedDictId = Lz4Base.readU32(this.buffer, cursor);
+                    cursor += 4;
+
+                    // Spec: If DictID is present, we must verify the provided dictionary matches.
+                    if (this.dictionary) {
+                        const dictHasher = new XXHash32(0);
+                        dictHasher.update(this.dictionary);
+                        const actualId = dictHasher.digest();
+
+                        if (actualId !== expectedDictId) {
+                            throw new Error(`LZ4: Dictionary ID Mismatch. Header: 0x${expectedDictId.toString(16)}, Provided: 0x${actualId.toString(16)}`);
+                        }
+                    } else {
+                        throw new Error("LZ4: Archive requires a Dictionary, but none was provided.");
+                    }
                 }
 
-                // Initialize Streams
-                if (this.hasContentChecksum && this.verifyChecksum) {
-                    this.checksumStream = new XXHash32Stream(0);
-                } else {
-                    this.checksumStream = null;
-                }
+                // Note: We skip Header Checksum verification for performance,
+                // but the byte is at `this.buffer[requiredLen - 1]`.
 
-                // Ensure workspace handles max block size
-                if (this.workspace.length < this.maxBlockSize) {
-                    this.workspace = new Uint8Array(this.maxBlockSize);
-                }
-
-                // Reset Window for new frame (Reload Dictionary if present)
-                this.window = this.initialDictionary.slice(0);
-
-                this.buffer = this.buffer.subarray(headerSize);
+                this.buffer = this.buffer.subarray(requiredLen);
                 this.state = STATES.BLOCK_SIZE;
             }
 
-            // --- 3. BLOCK SIZE ---
+            // --- STATE: BLOCK SIZE (4 bytes) ---
             if (this.state === STATES.BLOCK_SIZE) {
                 if (this.buffer.length < 4) break;
-                const field = Lz4Base.readU32(this.buffer, 0);
+
+                const val = Lz4Base.readU32(this.buffer, 0);
                 this.buffer = this.buffer.subarray(4);
 
-                // EndMark
-                if (field === 0) {
+                // Check for EndMark (0x00000000)
+                if (val === 0) {
                     this.state = STATES.CHECKSUM;
                     continue;
                 }
 
-                this.currentBlockSize = field & 0x7FFFFFFF;
-                this.isUncompressed = (field & 0x80000000) !== 0;
-
-                if (this.isUncompressed && this.currentBlockSize > this.maxBlockSize) {
-                    throw new Error(`LZ4: Uncompressed block size ${this.currentBlockSize} exceeds max ${this.maxBlockSize}`);
-                }
+                // Parse Size & Compressed/Uncompressed Flag
+                this.isUncompressed = (val & 0x80000000) !== 0;
+                this.currentBlockSize = val & 0x7FFFFFFF;
 
                 this.state = STATES.BLOCK_BODY;
             }
 
-            // --- 4. BLOCK BODY ---
+            // --- STATE: BLOCK BODY (Size + Optional BlockChecksum) ---
             if (this.state === STATES.BLOCK_BODY) {
-                let needed = this.currentBlockSize;
-                if (this.hasBlockChecksum) needed += 4;
+                let requiredLen = this.currentBlockSize;
+                if (this.hasBlockChecksum) requiredLen += 4;
 
-                if (this.buffer.length < needed) break;
+                if (this.buffer.length < requiredLen) break;
 
                 const blockData = this.buffer.subarray(0, this.currentBlockSize);
 
-                // Ignore Block Checksum bytes if present (skipping validation for speed in this implementation)
-                // const checksumData = this.hasBlockChecksum ? this.buffer.subarray(this.currentBlockSize, needed) : null;
-
-                this.buffer = this.buffer.subarray(needed);
+                // Advance buffer (Skip Data + Block Checksum)
+                this.buffer = this.buffer.subarray(requiredLen);
 
                 let decodedChunk;
+
                 if (this.isUncompressed) {
-                    decodedChunk = blockData.slice(0); // Copy to ensure safety
+                    decodedChunk = blockData.slice(); // Copy safe
                 } else {
-                    // Pass THIS.WINDOW as the 'dictionary' for dependent blocks
-                    const written = decompressBlock(blockData, this.workspace, this.window);
-                    decodedChunk = this.workspace.slice(0, written);
+                    // Prepare History for Decompression
+                    // If Independent, dict is null.
+                    // If Dependent, we pass the active window history.
+                    let dict = null;
+                    if (!this.blockIndependence) {
+                        // If window is full (64KB), pass whole window.
+                        // If partially full (start of stream), pass valid slice.
+                        dict = (this.windowPos === this.windowSize)
+                            ? this.window
+                            : this.window.subarray(0, this.windowPos);
+                    }
+
+                    // Decompress into workspace
+                    // decompressBlock signature: (input, output, dictionary)
+                    const bytesWritten = decompressBlock(blockData, this.workspace, dict);
+                    decodedChunk = this.workspace.slice(0, bytesWritten);
                 }
 
-                // Update Content Checksum (if active)
-                if (this.checksumStream) this.checksumStream.update(decodedChunk);
-
-                // Update History Window (Crucial for next block)
-                this._updateWindow(decodedChunk);
-
                 output.push(decodedChunk);
+
+                // Update Content Checksum
+                if (this.hasher) this.hasher.update(decodedChunk);
+
+                // Update Window (History)
+                if (!this.blockIndependence) {
+                    this._updateWindow(decodedChunk);
+                }
+
                 this.state = STATES.BLOCK_SIZE;
             }
 
-            // --- 5. FRAME CHECKSUM ---
+            // --- STATE: CONTENT CHECKSUM (4 bytes) ---
             if (this.state === STATES.CHECKSUM) {
                 if (this.hasContentChecksum) {
                     if (this.buffer.length < 4) break;
-                    const stored = Lz4Base.readU32(this.buffer, 0);
 
-                    if (this.verifyChecksum && this.checksumStream) {
-                        if (stored !== this.checksumStream.finalize()) {
+                    if (this.verifyChecksum && this.hasher) {
+                        const stored = Lz4Base.readU32(this.buffer, 0);
+                        const actual = this.hasher.digest();
+                        if (stored !== actual) {
                             throw new Error("LZ4: Content Checksum Error");
                         }
                     }
                     this.buffer = this.buffer.subarray(4);
                 }
 
-                // Frame complete.
+                // Frame Completed.
+                // Reset to MAGIC to support concatenated LZ4 frames (e.g. Linux kernel style)
                 this.state = STATES.MAGIC;
-                this.checksumStream = null;
-                // Note: We don't clear window here; we reset it at the start of the next HEADER phase.
+                this.hasher = null;
 
+                // If buffer is empty, we are truly done
                 if (this.buffer.length === 0) break;
             }
         }
+
         return output;
+    }
+
+    /**
+     * Shifts the window buffer to maintain the last 64KB of history.
+     * @param {Uint8Array} chunk - The newly decompressed data.
+     * @private
+     */
+    _updateWindow(chunk) {
+        const winLen = this.windowSize;
+        const chunkLen = chunk.length;
+
+        // Case 1: Huge chunk replaces entire window
+        if (chunkLen >= winLen) {
+            this.window.set(chunk.subarray(chunkLen - winLen), 0);
+            this.windowPos = winLen;
+            return;
+        }
+
+        // Case 2: Chunk fits in remaining space
+        if (this.windowPos + chunkLen <= winLen) {
+            this.window.set(chunk, this.windowPos);
+            this.windowPos += chunkLen;
+            return;
+        }
+
+        // Case 3: Overflow - Shift history to make room
+        // We keep (winLen - chunkLen) bytes from the END of the current valid window.
+        const keep = winLen - chunkLen;
+        const srcOffset = this.windowPos - keep;
+
+        // Shift valid history to index 0
+        this.window.copyWithin(0, srcOffset, this.windowPos);
+
+        // Append new chunk
+        this.window.set(chunk, keep);
+        this.windowPos = winLen;
     }
 }
