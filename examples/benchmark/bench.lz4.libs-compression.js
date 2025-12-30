@@ -6,8 +6,8 @@ import { generateData, measure, printResults, printSystemInfo } from './bench-ut
 printSystemInfo();
 console.log("\n--- LZ4 Libraries: Compression Benchmark ---");
 
-const SIZES = [1, 5, 25]; // MB
-
+// const SIZES = [1, 5, 25]; // MB
+const SIZES = [1, 4, 8, 16, 32, 64]; // MB
 // Warmup V8 JIT
 console.log("Warmup...");
 const warmupData = Buffer.from(generateData(0.1));
@@ -19,7 +19,7 @@ for (const size of SIZES) {
     const results = [];
 
     // 1. Divortio LZ4 (Local)
-    results.push(measure('Divortio LZ4', () => {
+    results.push(measure('divortio-lz4 (Pure JS)', () => {
         return LZ4.compress(input, null, 4194304, true, false);
     }, input.byteLength));
 

@@ -1,12 +1,11 @@
 import { it, describe } from 'node:test';
 import assert from 'node:assert';
 import { LZ4Encoder } from '../../src/shared/lz4Encode.js';
-import {
-    MAGIC_NUMBER,
+
+import { Lz4TestUtils,
     FLG_BLOCK_INDEP_MASK,
-    FLG_CONTENT_CHECKSUM_MASK
-} from '../../src/shared/constants.js';
-import { Lz4Base } from '../../src/shared/lz4Base.js';
+    FLG_CONTENT_CHECKSUM_MASK, MAGIC_NUMBER } from '../lz4TestUtils.js';
+
 
 describe('LZ4Encoder (Shared Unit)', () => {
 
@@ -15,7 +14,7 @@ describe('LZ4Encoder (Shared Unit)', () => {
         const input = new Uint8Array([1, 2, 3]);
         const chunks = encoder.update(input);
         assert.ok(chunks.length > 0);
-        const magic = Lz4Base.readU32(chunks[0], 0);
+        const magic = Lz4TestUtils.readU32(chunks[0], 0);
         assert.strictEqual(magic, MAGIC_NUMBER);
     });
 
@@ -36,7 +35,7 @@ describe('LZ4Encoder (Shared Unit)', () => {
         assert.ok(finalChunks.length >= 2);
         const endMarkChunk = finalChunks[finalChunks.length - 1];
         assert.strictEqual(endMarkChunk.length, 4);
-        assert.strictEqual(Lz4Base.readU32(endMarkChunk, 0), 0);
+        assert.strictEqual(Lz4TestUtils.readU32(endMarkChunk, 0), 0);
     });
 
     it('should configure Frame Header flags correctly', () => {

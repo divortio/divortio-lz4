@@ -1,8 +1,8 @@
 import { it, describe } from 'node:test';
 import assert from 'node:assert';
 import { compressBuffer } from '../../src/buffer/bufferCompress.js';
-import { MAGIC_NUMBER } from '../../src/shared/constants.js';
-import { Lz4Base } from '../../src/shared/lz4Base.js';
+
+import { Lz4TestUtils, MAGIC_NUMBER } from '../lz4TestUtils.js';
 
 describe('Buffer Compression', () => {
     it('should produce a valid LZ4 Frame header', () => {
@@ -10,7 +10,7 @@ describe('Buffer Compression', () => {
         const compressed = compressBuffer(input);
 
         assert.ok(compressed.length > 7);
-        const magic = Lz4Base.readU32(compressed, 0);
+        const magic = Lz4TestUtils.readU32(compressed, 0);
         assert.strictEqual(magic, MAGIC_NUMBER);
     });
 
@@ -42,7 +42,7 @@ describe('Buffer Compression', () => {
         const indep = compressBuffer(input, null, 65536, true, false); // Independent
         const dep = compressBuffer(input, null, 65536, false, false);  // Dependent
 
-        assert.strictEqual(Lz4Base.readU32(indep, 0), MAGIC_NUMBER);
-        assert.strictEqual(Lz4Base.readU32(dep, 0), MAGIC_NUMBER);
+        assert.strictEqual(Lz4TestUtils.readU32(indep, 0), MAGIC_NUMBER);
+        assert.strictEqual(Lz4TestUtils.readU32(dep, 0), MAGIC_NUMBER);
     });
 });

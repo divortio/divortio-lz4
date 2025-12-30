@@ -1,10 +1,11 @@
 /**
  * src/block/blockDecompress.js
  * LZ4 Block Decompression Kernel.
- * Optimized for V8 with native intrinsics and edge-case handling.
+ * Optimized for V8 with native intrinsics, constant folding, and loop unrolling.
  */
 
-import { MIN_MATCH } from "../shared/constants.js";
+// --- Localized Constants for V8 Optimization ---
+const MIN_MATCH = 4 | 0;
 
 /**
  * Decompresses a raw LZ4 block.
@@ -19,18 +20,30 @@ export function decompressBlock(input, output, dictionary) {
     var outPos = 0 | 0;
     var inLen = input.length | 0;
     var outLen = output.length | 0;
-
     var dictLen = dictionary ? dictionary.length | 0 : 0;
+
+    // Hoisted variables to prevent stack thrashing in hot loop
+    var token = 0 | 0;
+    var literalLen = 0 | 0;
+    var matchLen = 0 | 0;
+    var offset = 0 | 0;
+    var endLit = 0 | 0;
+    var s = 0 | 0;
+    var copySrc = 0 | 0;
+    var dictIndex = 0 | 0;
+    var bytesFromDict = 0 | 0;
+    var remaining = 0 | 0;
+    var endMatch = 0 | 0;
+    var readPtr = 0 | 0;
 
     while (inPos < inLen) {
         // 1. Read Token
-        var token = input[inPos++];
+        token = input[inPos++];
 
         // --- Literals ---
-        var literalLen = (token >>> 4) | 0;
+        literalLen = (token >>> 4) | 0;
 
         if (literalLen === 0x0F) {
-            var s = 0 | 0;
             do {
                 if (inPos >= inLen) throw new Error("LZ4: Unexpected end of input reading literals");
                 s = input[inPos++];
@@ -40,12 +53,19 @@ export function decompressBlock(input, output, dictionary) {
 
         // Copy Literals
         if (literalLen > 0) {
-            var endLit = (inPos + literalLen) | 0;
+            endLit = (inPos + literalLen) | 0;
             if (endLit > inLen || (outPos + literalLen) > outLen) {
                 throw new Error("LZ4: Output buffer too small or input malformed during literals");
             }
 
-            // Simple loop is fastest for the mixture of small/medium literals common in LZ4
+            // OPTIMIZATION: Unrolled Loop (4 bytes per step)
+            // Reduces CPU branch prediction overhead for string/data runs
+            while (inPos < (endLit - 3)) {
+                output[outPos++] = input[inPos++];
+                output[outPos++] = input[inPos++];
+                output[outPos++] = input[inPos++];
+                output[outPos++] = input[inPos++];
+            }
             while (inPos < endLit) {
                 output[outPos++] = input[inPos++];
             }
@@ -56,15 +76,14 @@ export function decompressBlock(input, output, dictionary) {
         // --- Match ---
         // Offset (16-bit Little Endian)
         if (inPos + 2 > inLen) throw new Error("LZ4: Unexpected end of input reading offset");
-        var offset = (input[inPos] | (input[inPos + 1] << 8)) | 0;
+        offset = (input[inPos] | (input[inPos + 1] << 8)) | 0;
         inPos = (inPos + 2) | 0;
 
         if (offset === 0) throw new Error("LZ4: Invalid offset 0");
 
         // Match Length
-        var matchLen = (token & 0x0F) | 0;
+        matchLen = (token & 0x0F) | 0;
         if (matchLen === 0x0F) {
-            var s = 0 | 0;
             do {
                 if (inPos >= inLen) throw new Error("LZ4: Unexpected end of input reading match length");
                 s = input[inPos++];
@@ -77,14 +96,14 @@ export function decompressBlock(input, output, dictionary) {
         if ((outPos + matchLen) > outLen) throw new Error("LZ4: Output buffer too small for match");
 
         // --- Match Copy Logic ---
-        var copySrc = (outPos - offset) | 0;
+        copySrc = (outPos - offset) | 0;
 
         // 1. Dictionary Match (Negative index)
         if (copySrc < 0) {
-            var dictIndex = (dictLen + copySrc) | 0;
+            dictIndex = (dictLen + copySrc) | 0;
             if (dictIndex < 0) throw new Error(`LZ4: Invalid match offset ${offset} exceeds dictionary window`);
 
-            var bytesFromDict = (0 - copySrc) | 0;
+            bytesFromDict = (0 - copySrc) | 0;
 
             if (matchLen <= bytesFromDict) {
                 // Entirely within dictionary
@@ -102,31 +121,29 @@ export function decompressBlock(input, output, dictionary) {
                 while (dictIndex < dictLen) output[outPos++] = dictionary[dictIndex++];
 
                 // Split Match: Output part (Overlap logic)
-                // Fallthrough to overlap copy manually
-                var remaining = (matchLen - bytesFromDict) | 0;
-                var endMatch = (outPos + remaining) | 0;
-                var readPtr = (outPos - offset) | 0;
+                remaining = (matchLen - bytesFromDict) | 0;
+                endMatch = (outPos + remaining) | 0;
+                readPtr = (outPos - offset) | 0;
                 while (outPos < endMatch) output[outPos++] = output[readPtr++];
             }
         }
         // 2. Internal Match
         else {
-            // OPTIMIZATION 1: RLE -> memset
+            // OPTIMIZATION 1: RLE -> memset (Fastest for single-byte repeats)
             if (offset === 1) {
                 output.fill(output[copySrc], outPos, outPos + matchLen);
                 outPos = (outPos + matchLen) | 0;
             }
-                // OPTIMIZATION 2: Non-Overlapping -> memmove
-                // FIX: Changed > to >=. If offset == matchLen, the regions are adjacent but distinct.
-            // This captures the "Repeat String" pattern perfectly.
+                // OPTIMIZATION 2: Non-Overlapping -> memmove (Fastest for bulk copies)
+            // Use copyWithin when regions don't overlap or match is "long enough" to justify overhead
             else if (offset >= matchLen && matchLen > 16) {
                 output.copyWithin(outPos, copySrc, copySrc + matchLen);
                 outPos = (outPos + matchLen) | 0;
             }
             // General Copy (Unrolled if safe)
             else {
-                var endMatch = (outPos + matchLen) | 0;
-                var readPtr = copySrc;
+                endMatch = (outPos + matchLen) | 0;
+                readPtr = copySrc;
 
                 // Safe to unroll if overlap distance >= 4 bytes
                 if (offset >= 4) {
@@ -137,7 +154,7 @@ export function decompressBlock(input, output, dictionary) {
                         output[outPos++] = output[readPtr++];
                     }
                 }
-                // Fallback for tight overlaps or remainder
+                // Fallback for tight overlaps (offset < 4) or remainder
                 while (outPos < endMatch) {
                     output[outPos++] = output[readPtr++];
                 }

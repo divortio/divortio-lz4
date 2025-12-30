@@ -1,20 +1,20 @@
 import { createDecompressStream } from "./streamDecompress.js";
 import { createTimeSlicer } from "./scheduler.js";
-import { Lz4Base } from "../shared/lz4Base.js";
+import { ensureBuffer } from "../shared/lz4Util.js";
 
 /**
  * Asynchronously decompresses an LZ4 Frame into raw binary data.
  * Uses "Time Slicing" to prevent blocking the main thread.
  *
- * @param {Uint8Array|ArrayBuffer|ArrayBufferView} input - The compressed LZ4 Frame.
+ * @param {Uint8Array|ArrayBuffer|ArrayBufferView|string} input - The compressed LZ4 Frame.
  * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary.
- * @param {boolean} [verifyChecksum=true] - If false, skips checksum verification.
+ * @param {boolean} [verifyChecksum=true] - If false, skips checksum verification (faster).
  * @param {number} [chunkSize=524288] - Processing chunk size (default 512KB).
  * @returns {Promise<Uint8Array>} Resolved decompressed data.
  */
 export async function decompressAsync(input, dictionary = null, verifyChecksum = true, chunkSize = 524288) {
     // 1. Coerce input to Uint8Array immediately
-    const rawInput = Lz4Base.ensureBuffer(input);
+    const rawInput = ensureBuffer(input);
 
     // 2. Initialize Stream
     const stream = createDecompressStream(dictionary, verifyChecksum);

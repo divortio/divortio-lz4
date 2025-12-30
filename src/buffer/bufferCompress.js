@@ -1,17 +1,45 @@
 import { xxHash32 } from '../xxhash32/xxhash32.js';
 import { compressBlock } from '../block/blockCompress.js';
-import {
-    BLOCK_MAX_SIZES,
-    HASH_TABLE_SIZE,
-    MIN_MATCH,
-    HASH_SHIFT
-} from '../shared/constants.js';
-import { Lz4Base } from '../shared/lz4Base.js';
+import { ensureBuffer } from '../shared/lz4Util.js'; // New import
 
-const GLOBAL_HASH_TABLE = new Uint32Array(HASH_TABLE_SIZE);
+// --- Localized Constants ---
+const MIN_MATCH = 4 | 0;
+const HASH_LOG = 14 | 0;
+const HASH_TABLE_SIZE = 16384 | 0;
+const HASH_SHIFT = 18 | 0;
+const HASH_MASK = 16383 | 0;
+
+const LZ4_VERSION = 1;
+const FLG_BLOCK_INDEPENDENCE_MASK = 0x20;
+const FLG_CONTENT_CHECKSUM_MASK = 0x04;
+const FLG_DICT_ID_MASK = 0x01;
+
+const BLOCK_MAX_SIZES = {
+    4: 65536,
+    5: 262144,
+    6: 1048576,
+    7: 4194304
+};
+
+const GLOBAL_HASH_TABLE = new Int32Array(HASH_TABLE_SIZE);
+
+// --- Local Helpers ---
+function writeU32(b, i, n) {
+    b[n] = i & 0xFF;
+    b[n + 1] = (i >>> 8) & 0xFF;
+    b[n + 2] = (i >>> 16) & 0xFF;
+    b[n + 3] = (i >>> 24) & 0xFF;
+}
+
+function getBlockId(bytes) {
+    if (!bytes || bytes <= 65536) return 4;
+    if (bytes <= 262144) return 5;
+    if (bytes <= 1048576) return 6;
+    return 7;
+}
 
 export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304, blockIndependence = false, contentChecksum = false) {
-    const rawInput = Lz4Base.ensureBuffer(input);
+    const rawInput = ensureBuffer(input);
 
     let workingBuffer = rawInput;
     let inputStartOffset = 0;
@@ -19,7 +47,7 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
     let dictId = null;
 
     if (dictionary && dictionary.length > 0) {
-        const dictBuffer = Lz4Base.ensureBuffer(dictionary);
+        const dictBuffer = ensureBuffer(dictionary);
         dictId = xxHash32(dictBuffer, 0);
 
         const dictWindow = dictBuffer.length > 65536 ? dictBuffer.subarray(dictBuffer.length - 65536) : dictBuffer;
@@ -32,34 +60,50 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
     }
 
     const len = rawInput.length | 0;
-    const bdId = Lz4Base.getBlockId(maxBlockSize);
+    const bdId = getBlockId(maxBlockSize);
     const resolvedBlockSize = BLOCK_MAX_SIZES[bdId] | 0;
 
     const worstCaseSize = (15 + len + (len / 255 | 0) + 64 + 8) | 0;
     const output = new Uint8Array(worstCaseSize);
     let outPos = 0 | 0;
 
-    // Header
-    const header = Lz4Base.createFrameHeader(blockIndependence, contentChecksum, bdId, dictId);
-    output.set(header, outPos);
-    outPos = (outPos + header.length) | 0;
+    // --- Header Generation (Inlined) ---
+    // Magic Number (0x184D2204) Little Endian
+    output[outPos++] = 0x04; output[outPos++] = 0x22; output[outPos++] = 0x4D; output[outPos++] = 0x18;
 
-    // Compress Blocks
+    // FLG
+    let flg = (LZ4_VERSION << 6);
+    if (blockIndependence) flg |= FLG_BLOCK_INDEPENDENCE_MASK;
+    if (contentChecksum) flg |= FLG_CONTENT_CHECKSUM_MASK;
+    if (dictId !== null) flg |= FLG_DICT_ID_MASK;
+    output[outPos++] = flg;
+
+    // BD
+    output[outPos++] = (bdId & 0x07) << 4;
+
+    // Dict ID
+    const headerStart = 4;
+    if (dictId !== null) {
+        writeU32(output, dictId, outPos);
+        outPos += 4;
+    }
+
+    // Header Checksum
+    const headerHash = xxHash32(output.subarray(headerStart, outPos), 0);
+    output[outPos++] = (headerHash >>> 8) & 0xFF;
+
+    // --- Compression ---
     const hashTable = GLOBAL_HASH_TABLE;
     hashTable.fill(0);
 
-    // FIX: Restore Dictionary Warming (Critical for Dictionary Tests)
-    // We must use the EXACT same hash logic as blockCompress.
+    // Dictionary Warming (Same logic as before)
     if (dictLen > 0) {
-        const HASH_MASK = (HASH_TABLE_SIZE - 1) | 0;
-        const limit = (dictLen - 4) | 0; // Don't overshoot
+        const mask = HASH_MASK;
+        const shift = HASH_SHIFT;
+        const limit = (dictLen - 4) | 0;
 
-        // Scan the dictionary to populate the hash table
         for (let i = 0; i <= limit; i++) {
-            // 1. Read Sequence
             var seq = (workingBuffer[i] | (workingBuffer[i + 1] << 8) | (workingBuffer[i + 2] << 16) | (workingBuffer[i + 3] << 24)) | 0;
-
-            // 2. Hash (Bob Jenkins / lz4js variant inline)
             var h = seq;
             h = (h + 2127912214 + (h << 12)) | 0;
             h = (h ^ -949894596 ^ (h >>> 19)) | 0;
@@ -67,10 +111,7 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
             h = (h + -744332180 ^ (h << 9)) | 0;
             h = (h + -42973499 + (h << 3)) | 0;
             h = (h ^ -1252372727 ^ (h >>> 16)) | 0;
-
-            var hash = (h >>> HASH_SHIFT) & HASH_MASK;
-
-            // 3. Store (1-based index)
+            var hash = (h >>> shift) & mask;
             hashTable[hash] = i + 1;
         }
     }
@@ -90,10 +131,10 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
         const compSize = compressBlock(workingBuffer, destView, srcPos, blockSize, hashTable);
 
         if (compSize > 0 && compSize < blockSize) {
-            Lz4Base.writeU32(output, compSize, sizePos);
+            writeU32(output, compSize, sizePos);
             outPos = (outPos + compSize) | 0;
         } else {
-            Lz4Base.writeU32(output, blockSize | 0x80000000, sizePos);
+            writeU32(output, blockSize | 0x80000000, sizePos);
             output.set(workingBuffer.subarray(srcPos, end), outPos);
             outPos = (outPos + blockSize) | 0;
         }
@@ -105,12 +146,12 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
         srcPos = end;
     }
 
-    Lz4Base.writeU32(output, 0, outPos);
+    writeU32(output, 0, outPos);
     outPos = (outPos + 4) | 0;
 
     if (contentChecksum) {
         const fullHash = xxHash32(rawInput, 0);
-        Lz4Base.writeU32(output, fullHash, outPos);
+        writeU32(output, fullHash, outPos);
         outPos = (outPos + 4) | 0;
     }
 

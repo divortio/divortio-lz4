@@ -1,38 +1,128 @@
 /**
  * src/shared/lz4Encode.js
  * Stateful LZ4 Encoder for streaming compression.
- * Optimized to match blockCompress.js hash logic.
+ *
+ * Architecture:
+ * - Implements a Rolling Window buffer to support history across chunk boundaries.
+ * - Manages dictionary warming and hash table updates for dependent blocks.
+ * - Optimized for V8 JIT with localized constants to trigger aggressive constant folding.
  */
 
 import { XXHash32 } from "../xxhash32/xxhash32Stateful.js";
 import { compressBlock } from "../block/blockCompress.js";
-import { Lz4Base } from "./lz4Base.js";
-import {
-    BLOCK_MAX_SIZES,
-    HASH_TABLE_SIZE,
-    MIN_MATCH,
-    HASH_SHIFT
-} from "./constants.js";
+import { ensureBuffer } from "../shared/lz4Util.js";
+
+// --- Localized Constants for V8 Optimization ---
+// Defining these locally allows TurboFan to treat them as immediate operands.
+const MIN_MATCH = 4 | 0;
+const HASH_LOG = 14 | 0;
+const HASH_TABLE_SIZE = 16384 | 0; // 1 << HASH_LOG
+const HASH_SHIFT = 18 | 0;         // 32 - HASH_LOG
+const HASH_MASK = 16383 | 0;       // HASH_TABLE_SIZE - 1
+const MAX_WINDOW_SIZE = 65536 | 0;
+
+const MAGIC_NUMBER = 0x184D2204;
+const LZ4_VERSION = 1;
+const FLG_BLOCK_INDEPENDENCE_MASK = 0x20;
+const FLG_CONTENT_CHECKSUM_MASK = 0x04;
+const FLG_DICT_ID_MASK = 0x01;
+
+// Block Sizes Map (Inlined for speed)
+const BLOCK_MAX_SIZES = {
+    4: 65536,
+    5: 262144,
+    6: 1048576,
+    7: 4194304
+};
+
+// --- Local Helpers ---
+
+/**
+ * Writes a 32-bit unsigned integer in Little Endian format.
+ * Inlined to avoid function call overhead in hot paths.
+ * @param {Uint8Array} b - Buffer
+ * @param {number} i - Integer to write
+ * @param {number} n - Offset
+ */
+function writeU32(b, i, n) {
+    b[n] = i & 0xFF;
+    b[n + 1] = (i >>> 8) & 0xFF;
+    b[n + 2] = (i >>> 16) & 0xFF;
+    b[n + 3] = (i >>> 24) & 0xFF;
+}
+
+/**
+ * Maps byte size to LZ4 Block ID.
+ * @param {number} bytes
+ * @returns {number} 4, 5, 6, or 7
+ */
+function getBlockId(bytes) {
+    if (!bytes || bytes <= 65536) return 4;
+    if (bytes <= 262144) return 5;
+    if (bytes <= 1048576) return 6;
+    return 7;
+}
+
+/**
+ * Generates the LZ4 Frame Header.
+ * @param {boolean} blockIndependence
+ * @param {boolean} contentChecksum
+ * @param {number} blockId
+ * @param {number|null} dictId
+ * @returns {Uint8Array}
+ */
+function createFrameHeader(blockIndependence, contentChecksum, blockId, dictId = null) {
+    const headerLen = dictId !== null ? 11 : 7;
+    const header = new Uint8Array(headerLen);
+
+    // Magic Number
+    header[0] = 0x04; header[1] = 0x22; header[2] = 0x4D; header[3] = 0x18;
+
+    // Flags
+    let flg = (LZ4_VERSION << 6);
+    if (blockIndependence) flg |= FLG_BLOCK_INDEPENDENCE_MASK;
+    if (contentChecksum) flg |= FLG_CONTENT_CHECKSUM_MASK;
+    if (dictId !== null) flg |= FLG_DICT_ID_MASK;
+    header[4] = flg;
+
+    // BD
+    header[5] = (blockId & 0x07) << 4;
+
+    let hcPos = 6;
+    if (dictId !== null) {
+        writeU32(header, dictId, 6);
+        hcPos = 10;
+    }
+
+    // Header Checksum
+    const hasher = new XXHash32(0);
+    hasher.update(header.subarray(4, hcPos));
+    const headerHash = hasher.digest();
+    header[hcPos] = (headerHash >>> 8) & 0xFF;
+
+    return header;
+}
 
 export class LZ4Encoder {
     /**
-     * @param {Uint8Array|null} [dictionary=null]
-     * @param {number} [maxBlockSize=4194304] - Default 4MB
-     * @param {boolean} [blockIndependence=false]
-     * @param {boolean} [contentChecksum=false]
+     * Creates a stateful LZ4 Encoder.
+     * @param {Uint8Array|null} [dictionary=null] - Initial dictionary for compression (optional).
+     * @param {number} [maxBlockSize=4194304] - Max block size (default 4MB).
+     * @param {boolean} [blockIndependence=false] - If false, allows matches across blocks (better compression, slower seeking).
+     * @param {boolean} [contentChecksum=false] - If true, appends XXHash32 checksum at the end of the stream.
      */
     constructor(dictionary = null, maxBlockSize = 4194304, blockIndependence = false, contentChecksum = false) {
         this.blockIndependence = blockIndependence;
         this.contentChecksum = contentChecksum;
-        this.bdId = Lz4Base.getBlockId(maxBlockSize);
+        this.bdId = getBlockId(maxBlockSize);
         this.blockSize = BLOCK_MAX_SIZES[this.bdId];
 
-        this.maxWindowSize = 65536;
+        this.maxWindowSize = MAX_WINDOW_SIZE;
         this.bufferCapacity = this.maxWindowSize + this.blockSize + 4096;
         this.buffer = new Uint8Array(this.bufferCapacity);
 
-        // OPTIMIZATION: Use Uint32Array to match blockCompress.js
-        this.hashTable = new Uint32Array(HASH_TABLE_SIZE);
+        // OPTIMIZATION: Use Int32Array (SMI) for faster indexing in V8
+        this.hashTable = new Int32Array(HASH_TABLE_SIZE);
 
         this.hasher = this.contentChecksum ? new XXHash32(0) : null;
         this.hasWrittenHeader = false;
@@ -47,10 +137,15 @@ export class LZ4Encoder {
         }
     }
 
+    /**
+     * Warms the dictionary and populates the initial hash table.
+     * @param {Uint8Array} dict
+     * @private
+     */
     _initDictionary(dict) {
-        const d = Lz4Base.ensureBuffer(dict);
+        const d = ensureBuffer(dict);
 
-        // Calculate DictID (Standard xxHash32)
+        // Calculate DictID
         const dictHasher = new XXHash32(0);
         dictHasher.update(d);
         this.dictId = dictHasher.digest();
@@ -65,11 +160,12 @@ export class LZ4Encoder {
         this.dictSize = windowSize;
 
         // Warm hash table
-        // CRITICAL FIX: Must use the EXACT same hash algorithm as blockCompress.js
         const end = windowSize - MIN_MATCH;
         const base = this.buffer;
         const table = this.hashTable;
-        const HASH_MASK = (HASH_TABLE_SIZE - 1) | 0;
+
+        const mask = HASH_MASK;
+        const shift = HASH_SHIFT;
 
         for (let i = 0; i <= end; i++) {
             // 1. Read Sequence
@@ -84,19 +180,22 @@ export class LZ4Encoder {
             h = (h + -42973499 + (h << 3)) | 0;
             h = (h ^ -1252372727 ^ (h >>> 16)) | 0;
 
-            const hash = (h >>> HASH_SHIFT) & HASH_MASK;
-
-            // 3. Store (1-based index)
+            const hash = (h >>> shift) & mask;
             table[hash] = i + 1;
         }
     }
 
+    /**
+     * Adds data to the encoder stream.
+     * @param {Uint8Array} chunk - Data to compress.
+     * @returns {Uint8Array[]} Array of compressed LZ4 blocks.
+     */
     update(chunk) {
         if (this.isClosed) throw new Error("LZ4: Encoder closed");
         const frames = [];
 
         if (!this.hasWrittenHeader) {
-            frames.push(Lz4Base.createFrameHeader(
+            frames.push(createFrameHeader(
                 this.blockIndependence,
                 this.contentChecksum,
                 this.bdId,
@@ -127,6 +226,12 @@ export class LZ4Encoder {
         return frames;
     }
 
+    /**
+     * Compresses the current buffer content into a block.
+     * @param {boolean} isFinal - True if this is the last block of the stream.
+     * @returns {Uint8Array} Compressed block or EndMark.
+     * @private
+     */
     _flushBlock(isFinal) {
         const srcStart = this.dictSize;
         const totalLen = this.inputPos;
@@ -150,11 +255,13 @@ export class LZ4Encoder {
 
         let resultBlock;
 
+        // Decide between Compressed or Uncompressed block
         if (compSize > 0 && compSize < sizeToCompress) {
-            Lz4Base.writeU32(output, compSize, 0);
+            writeU32(output, compSize, 0);
             resultBlock = output.subarray(0, 4 + compSize);
         } else {
-            Lz4Base.writeU32(output, sizeToCompress | 0x80000000, 0);
+            // Uncompressed flag: High bit set
+            writeU32(output, sizeToCompress | 0x80000000, 0);
             output.set(this.buffer.subarray(srcStart, srcStart + sizeToCompress), 4);
             resultBlock = output.subarray(0, 4 + sizeToCompress);
         }
@@ -162,6 +269,7 @@ export class LZ4Encoder {
         const bytesCompressed = sizeToCompress;
         const bytesEnd = srcStart + bytesCompressed;
 
+        // Window Management
         if (this.blockIndependence) {
             const leftovers = this.inputPos - bytesEnd;
             if (leftovers > 0) {
@@ -183,12 +291,12 @@ export class LZ4Encoder {
             this.inputPos = lenToMove;
             this.dictSize = preserveLen;
 
+            // Shift Hash Table indices
             const table = this.hashTable;
             const shift = shiftSrc;
+            const tableSize = HASH_TABLE_SIZE;
 
-            // Adjust hash table indices
-            // 1-based indexing: if (ref > shift) newRef = ref - shift;
-            for (let i = 0; i < HASH_TABLE_SIZE; i++) {
+            for (let i = 0; i < tableSize; i++) {
                 const ref = table[i];
                 if (ref > shift) {
                     table[i] = ref - shift;
@@ -201,12 +309,20 @@ export class LZ4Encoder {
         return resultBlock;
     }
 
+    /**
+     * Creates the 4-byte End Mark (0x00000000).
+     * @private
+     */
     _createEndMark() {
         const b = new Uint8Array(4);
-        Lz4Base.writeU32(b, 0, 0);
+        writeU32(b, 0, 0);
         return b;
     }
 
+    /**
+     * Finalizes the stream.
+     * @returns {Uint8Array[]} Final blocks including EndMark and Checksum.
+     */
     finish() {
         if (this.isClosed) return [];
         this.isClosed = true;
@@ -214,7 +330,7 @@ export class LZ4Encoder {
         const frames = [];
 
         if (!this.hasWrittenHeader) {
-            frames.push(Lz4Base.createFrameHeader(this.blockIndependence, this.contentChecksum, this.bdId, this.dictId));
+            frames.push(createFrameHeader(this.blockIndependence, this.contentChecksum, this.bdId, this.dictId));
         }
 
         while ((this.inputPos - this.dictSize) > 0) {
@@ -226,7 +342,7 @@ export class LZ4Encoder {
         if (this.contentChecksum && this.hasher) {
             const digest = this.hasher.digest();
             const b = new Uint8Array(4);
-            Lz4Base.writeU32(b, digest, 0);
+            writeU32(b, digest, 0);
             frames.push(b);
         }
 
