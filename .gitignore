@@ -128,3 +128,4 @@ divortio-lz4.iml
 .DS_Store
 *.cpuprofile
 examples/benchmark/decompression-1MB.cpuprofile
+examples/benchmark/decompression-1MB.cpuprofile
