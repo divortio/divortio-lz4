@@ -1,8 +1,12 @@
+/**
+ * src/buffer/bufferDecompress.js
+ * LZ4 Frame Format Decompression - Zero Allocation Edition.
+ */
+
 import { xxHash32 } from '../xxhash32/xxhash32.js';
 import { decompressBlock } from '../block/blockDecompress.js';
-import { ensureBuffer } from '../shared/lz4Util.js'; // New import
+import { ensureBuffer } from '../shared/lz4Util.js';
 
-// --- Localized Constants ---
 const MAGIC_NUMBER = 0x184D2204;
 const LZ4_VERSION = 1;
 const FLG_VERSION_MASK = 0xC0;
@@ -11,30 +15,21 @@ const FLG_CONTENT_SIZE_MASK = 0x08;
 const FLG_CONTENT_CHECKSUM_MASK = 0x04;
 const FLG_DICT_ID_MASK = 0x01;
 
-const BLOCK_MAX_SIZES = {
-    4: 65536,
-    5: 262144,
-    6: 1048576,
-    7: 4194304
-};
-
+const BLOCK_MAX_SIZES = { 4: 65536, 5: 262144, 6: 1048576, 7: 4194304 };
 const FALLBACK_WORKSPACE = new Uint8Array(BLOCK_MAX_SIZES[7]);
 
-// --- Local Helper ---
-function readU32(b, n) {
-    return (b[n] | (b[n + 1] << 8) | (b[n + 2] << 16) | (b[n + 3] << 24)) >>> 0;
-}
+// Function removed: readU32 (Inlined manually below)
 
 export function decompressBuffer(input, dictionary = null, verifyChecksum = true) {
     const data = ensureBuffer(input);
     const len = data.length | 0;
     let pos = 0 | 0;
 
-    // --- Parse Header ---
-    if (len < 4 || readU32(data, pos) !== MAGIC_NUMBER) {
+    // Inline ReadU32 (Magic Number)
+    if (len < 4 || ((data[pos] | (data[pos + 1] << 8) | (data[pos + 2] << 16) | (data[pos + 3] << 24)) >>> 0) !== MAGIC_NUMBER) {
         throw new Error("LZ4: Invalid Magic Number");
     }
-    pos = (pos + 4) | 0;
+    pos += 4;
 
     const flg = data[pos++];
     const version = (flg & FLG_VERSION_MASK) >> 6;
@@ -49,101 +44,73 @@ export function decompressBuffer(input, dictionary = null, verifyChecksum = true
 
     let expectedOutputSize = 0;
     if (hasContentSize) {
-        const low = readU32(data, pos);
-        const high = readU32(data, pos + 4);
+        // Inline ReadU32
+        const low = (data[pos] | (data[pos + 1] << 8) | (data[pos + 2] << 16) | (data[pos + 3] << 24)) >>> 0;
+        const high = (data[pos + 4] | (data[pos + 5] << 8) | (data[pos + 6] << 16) | (data[pos + 7] << 24)) >>> 0;
         pos = (pos + 8) | 0;
         expectedOutputSize = (high * 4294967296) + low;
     }
+    if (hasDictId) pos += 4;
+    pos++; // Header Checksum
 
-    if (hasDictId) {
-        const expectedDictId = readU32(data, pos);
-        pos = (pos + 4) | 0;
-        if (dictionary) {
-            const dictBuffer = ensureBuffer(dictionary);
-            const actualDictId = xxHash32(dictBuffer, 0);
-            if (actualDictId !== expectedDictId) throw new Error("LZ4: Dictionary ID Mismatch");
-        } else {
-            throw new Error("LZ4: Archive requires a Dictionary");
-        }
-    }
-
-    pos++; // Skip Header Checksum
-
-    // --- Strategy ---
-    const useDirectWrite = (expectedOutputSize > 0) && (!dictionary);
+    const useDirectWrite = (expectedOutputSize > 0);
 
     let result = null;
     let resultPos = 0;
-    const outputChunks = [];
-
-    // History Window
+    let outputChunks = null;
     let window = null;
     let windowPos = 0;
     const WINDOW_SIZE = 65536;
 
     if (useDirectWrite) {
-        try {
-            result = new Uint8Array(expectedOutputSize);
-        } catch (e) {
-            throw new Error(`LZ4: Unable to allocate ${expectedOutputSize} bytes.`);
-        }
+        result = new Uint8Array(expectedOutputSize);
     } else {
+        outputChunks = [];
         window = new Uint8Array(WINDOW_SIZE);
         if (dictionary) {
-            const dict = ensureBuffer(dictionary);
-            const size = Math.min(dict.length, WINDOW_SIZE);
-            window.set(dict.subarray(dict.length - size), 0);
-            windowPos = size;
+            const dLen = dictionary.length;
+            if (dLen > WINDOW_SIZE) {
+                window.set(dictionary.subarray(dLen - WINDOW_SIZE), 0);
+                windowPos = WINDOW_SIZE;
+            } else {
+                window.set(dictionary, 0);
+                windowPos = dLen;
+            }
         }
     }
 
-    // --- Read Blocks ---
-    while (true) {
-        if (pos >= len) throw new Error("LZ4: Unexpected End of Stream");
+    let workspace = FALLBACK_WORKSPACE;
+    if (workspace.length < BLOCK_MAX_SIZES[7]) workspace = new Uint8Array(BLOCK_MAX_SIZES[7]);
 
-        const blockSizeField = readU32(data, pos);
-        pos = (pos + 4) | 0;
+    while (pos < len) {
+        // Inline ReadU32 (Block Size)
+        const blockSize = (data[pos] | (data[pos + 1] << 8) | (data[pos + 2] << 16) | (data[pos + 3] << 24)) >>> 0;
+        pos += 4;
+        if (blockSize === 0) break;
 
-        if (blockSizeField === 0) break; // EndMark
+        const isUncompressed = (blockSize & 0x80000000) !== 0;
+        const actualSize = blockSize & 0x7FFFFFFF;
 
-        const isUncompressed = (blockSizeField & 0x80000000) !== 0;
-        const blockSize = blockSizeField & 0x7FFFFFFF;
-
-        if ((pos + blockSize) > len) throw new Error("LZ4: Block exceeds file bounds");
-
-        const blockData = data.subarray(pos, pos + blockSize);
-        pos = (pos + blockSize) | 0;
-        if (hasBlockChecksum) pos = (pos + 4) | 0;
-
-        // --- Decompress ---
         if (useDirectWrite) {
-            const outputView = result.subarray(resultPos);
-            let currentDict = null;
-            if (resultPos >= 65536) currentDict = result.subarray(resultPos - 65536, resultPos);
-            else if (resultPos > 0) currentDict = result.subarray(0, resultPos);
-
-            let bytesWritten = 0;
             if (isUncompressed) {
-                result.set(blockData, resultPos);
-                bytesWritten = blockSize;
+                result.set(data.subarray(pos, pos + actualSize), resultPos);
+                resultPos += actualSize;
             } else {
-                bytesWritten = decompressBlock(blockData, outputView, currentDict);
+                const bytes = decompressBlock(data, pos, actualSize, result, resultPos, dictionary);
+                resultPos += bytes;
             }
-            resultPos += bytesWritten;
         } else {
-            const workspace = FALLBACK_WORKSPACE;
-            let chunk = null;
-
+            let chunk;
             if (isUncompressed) {
-                chunk = blockData.slice();
+                chunk = data.slice(pos, pos + actualSize);
+                outputChunks.push(chunk);
             } else {
-                const dict = (windowPos === WINDOW_SIZE) ? window : window.subarray(0, windowPos);
-                const bytes = decompressBlock(blockData, workspace, dict);
+                const dict = (windowPos > 0) ? window.subarray(0, windowPos) : null;
+                const bytes = decompressBlock(data, pos, actualSize, workspace, 0, dict);
                 chunk = workspace.slice(0, bytes);
+                outputChunks.push(chunk);
             }
-            outputChunks.push(chunk);
 
-            // Update Window
             const chunkLen = chunk.length;
             if (chunkLen >= WINDOW_SIZE) {
                 window.set(chunk.subarray(chunkLen - WINDOW_SIZE), 0);
@@ -158,24 +125,29 @@ export function decompressBuffer(input, dictionary = null, verifyChecksum = true
                 windowPos = WINDOW_SIZE;
             }
         }
+
+        pos += actualSize;
+        if (hasBlockChecksum) pos += 4;
     }
 
-    // --- Finalize ---
-    if (!result) {
-        let totalLen = 0;
-        for (const c of outputChunks) totalLen += c.length;
-        result = new Uint8Array(totalLen);
-        let offset = 0;
-        for (const c of outputChunks) {
-            result.set(c, offset);
-            offset += c.length;
+    if (!useDirectWrite) {
+        if (outputChunks.length === 1) {
+            result = outputChunks[0];
+        } else {
+            let totalLen = 0;
+            for (const c of outputChunks) totalLen += c.length;
+            result = new Uint8Array(totalLen);
+            let offset = 0;
+            for (const c of outputChunks) {
+                result.set(c, offset);
+                offset += c.length;
+            }
         }
-    } else {
-        if (resultPos < result.length) result = result.subarray(0, resultPos);
     }
 
     if (hasContentChecksum && verifyChecksum) {
-        const storedContentHash = readU32(data, pos);
+        // Inline ReadU32 (Content Checksum)
+        const storedContentHash = (data[pos] | (data[pos + 1] << 8) | (data[pos + 2] << 16) | (data[pos + 3] << 24)) >>> 0;
         const actualContentHash = xxHash32(result, 0);
         if (storedContentHash !== actualContentHash) throw new Error("LZ4: Content Checksum Error");
     }
