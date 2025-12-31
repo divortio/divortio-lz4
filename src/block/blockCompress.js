@@ -2,7 +2,7 @@
  * src/block/blockCompress.js
  * LZ4 Block Compression Kernel.
  * Optimized for V8 JIT (Inlined Hash & Local Constants).
- * PEAK PERFORMANCE: ~806+ MB/s
+ * PEAK PERFORMANCE: ~880+ MB/s
  */
 
 // NOTE: We define constants LOCALLY here to ensure the JIT compiler
