@@ -40,7 +40,17 @@ function getBlockId(bytes) {
     return 7;
 }
 
-export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304, blockIndependence = false, contentChecksum = false, addContentSize = true) {
+/**
+ * Compresses a buffer into an LZ4 Frame.
+ * @param {Uint8Array} input
+ * @param {Uint8Array} dictionary
+ * @param {number} maxBlockSize
+ * @param {boolean} blockIndependence
+ * @param {boolean} contentChecksum
+ * @param {boolean} addContentSize
+ * @param {Uint8Array} [outputBuffer] - Optional pre-allocated buffer to write to (avoids GC)
+ */
+export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304, blockIndependence = false, contentChecksum = false, addContentSize = true, outputBuffer = null) {
     const rawInput = ensureBuffer(input);
 
     let workingBuffer = rawInput;
@@ -65,10 +75,18 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
     const bdId = getBlockId(maxBlockSize);
     const resolvedBlockSize = BLOCK_MAX_SIZES[bdId] | 0;
 
-    const worstCaseSize = (19 + len + (len / 255 | 0) + 64 + 8) | 0;
-    const output = new Uint8Array(worstCaseSize);
+    // --- Output Buffer Selection ---
+    let output;
     let outPos = 0 | 0;
 
+    if (outputBuffer) {
+        output = outputBuffer;
+    } else {
+        const worstCaseSize = (19 + len + (len / 255 | 0) + 64 + 8) | 0;
+        output = new Uint8Array(worstCaseSize);
+    }
+
+    // --- Header ---
     output[outPos++] = 0x04; output[outPos++] = 0x22; output[outPos++] = 0x4D; output[outPos++] = 0x18;
 
     let flg = (LZ4_VERSION << 6);
@@ -97,7 +115,6 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
     const hashTable = GLOBAL_HASH_TABLE;
     hashTable.fill(0);
 
-    // Dictionary Warming (Preserved Jenkins Hash logic to match blockCompress)
     if (dictLen > 0) {
         const mask = HASH_MASK;
         const shift = HASH_SHIFT;
@@ -127,7 +144,7 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
         const sizePos = outPos;
         outPos = (outPos + 4) | 0;
 
-        // Optimization: Zero Allocation (Pass output and offset directly)
+        // Pass output and offset directly
         const compSize = compressBlock(workingBuffer, output, srcPos, blockSize, hashTable, outPos);
 
         if (compSize > 0 && compSize < blockSize) {
