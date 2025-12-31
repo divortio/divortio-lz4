@@ -1,4 +1,4 @@
-import { LZ4 } from '../../src/lz4.js';
+import { LZ4 } from '../src/lz4.js';
 import lz4Napi from 'lz4-napi';
 import lz4js from 'lz4js';
 import { generateData, measure, printResults, printSystemInfo } from './bench-utils.js';

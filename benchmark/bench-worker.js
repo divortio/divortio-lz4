@@ -40,8 +40,8 @@ async function runBenchmark() {
     // Dynamic Import & Setup
     switch (libName) {
         case 'divortio': {
-            const { LZ4 } = await import('../../src/lz4.js');
-            const { decompressBuffer } = await import('../../src/buffer/bufferDecompress.js');
+            const { LZ4 } = await import('../src/lz4.js');
+            const { decompressBuffer } = await import('../src/buffer/bufferDecompress.js');
 
             if (isDecompress) {
                 setupData = LZ4.compress(rawData, null, 4194304, true, false);
