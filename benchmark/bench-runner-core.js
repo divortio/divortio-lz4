@@ -7,14 +7,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = path.join(__dirname, 'bench-worker.js');
 
 const LIBRARIES = [
-    'lz4-napi',
-    'lz4-wasm',     // Existing (lz4-wasm-nodejs)
-    'lz4-wasm-web', // New (lz4-wasm generic/browser pkg)
-    'lz4-browser',  // New (lz4-browser pkg)
-    'snappy',
+    // 'lz4-napi',
+    // 'lz4-wasm',     // Existing (lz4-wasm-nodejs)
+    // 'lz4-wasm-web', // New (lz4-wasm generic/browser pkg)
+    // 'lz4-browser',  // New (lz4-browser pkg)
+    // 'snappy',
     'divortio',
     'lz4js',
-    'snappyjs'
+    // 'snappyjs'
 ];
 
 const SIZES = [1, 5, 25]; // MB

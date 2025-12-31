@@ -7,8 +7,7 @@
  * 2. **Static Types**: Uses bitwise operations (`| 0`) to force V8 to use 32-bit integer registers.
  * 3. **Double-Copy Literals**: Copies 8 bytes at a time for literals, using overlapping writes
  * for tails to avoid expensive byte-by-byte loops.
- * 4. **Jenkins Hash**: Uses a stable, multiplicative hash (Bob Jenkins) optimized for 32-bit systems.
- * 5. **Unrolled Match Check**: Checks 8 bytes at a time when extending matches.
+ * 4. **Fibonacci Hash**: Uses the standard LZ4 multiplicative hash (Math.imul) for maximum throughput.
  * @module blockCompress
  */
 
@@ -25,6 +24,9 @@ const HASH_SHIFT = 18 | 0;
 
 /** Mask to ensure hash index stays within bounds (16383). */
 const HASH_MASK = 16383 | 0;
+
+/** Constant for Multiplicative Hash (Knuth / Fibonacci) */
+const HASH_MULTIPLIER = 2654435761 | 0;
 
 /**
  * Compresses a single block of data using the LZ4 algorithm.
@@ -51,7 +53,6 @@ export function compressBlock(src, output, srcStart, srcLen, hashTable, outputOf
 
     // Hoisted Loop Variables (Prevents allocation in hot loop)
     var seq = 0 | 0;
-    var h = 0 | 0;
     var hash = 0 | 0;
     var mIndex = 0 | 0;
     var mStep = 0 | 0;
@@ -62,17 +63,10 @@ export function compressBlock(src, output, srcStart, srcLen, hashTable, outputOf
         // Read 32-bit integer (little-endian) manually to avoid DataView overhead
         seq = (src[sIndex] | (src[sIndex + 1] << 8) | (src[sIndex + 2] << 16) | (src[sIndex + 3] << 24)) | 0;
 
-        // 2. Hash (Bob Jenkins)
-        // Multiplies by large primes to distribute bits
-        h = seq;
-        h = (h + 2127912214 + (h << 12)) | 0;
-        h = (h ^ -949894596 ^ (h >>> 19)) | 0;
-        h = (h + 374761393 + (h << 5)) | 0;
-        h = (h + -744332180 ^ (h << 9)) | 0;
-        h = (h + -42973499 + (h << 3)) | 0;
-        h = (h ^ -1252372727 ^ (h >>> 16)) | 0;
-
-        hash = (h >>> HASH_SHIFT) & HASH_MASK;
+        // 2. Hash (Fibonacci / Multiplicative)
+        // Replaces the complex Jenkins hash with the standard LZ4 hash.
+        // This is significantly faster in V8 (single multiplication vs 6+ ops)
+        hash = (Math.imul(seq, HASH_MULTIPLIER) >>> HASH_SHIFT) & HASH_MASK;
 
         // 3. Lookup Match
         // We store positions as (index + 1) to distinguish 0 (empty) from index 0.
@@ -167,7 +161,9 @@ export function compressBlock(src, output, srcStart, srcLen, hashTable, outputOf
         var sPtr = (sIndex + 4) | 0;
         var mPtr = (mIndex + 4) | 0;
 
-        // Match Extension Loop (Unrolled 8-byte check)
+        // Match Extension Loop (Standard Byte Loop)
+        // REVERTED: Manual 4-byte check was slower in V8 due to manual integer construction costs.
+        // V8 optimizes this simple loop very effectively.
         while (sPtr < matchLimit && src[sPtr] === src[mPtr]) {
             sPtr = (sPtr + 1) | 0;
             mPtr = (mPtr + 1) | 0;
