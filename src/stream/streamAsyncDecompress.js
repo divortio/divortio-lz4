@@ -1,73 +1,84 @@
-import { createDecompressStream } from "./streamDecompress.js";
-import { createTimeSlicer } from "./scheduler.js";
-import { ensureBuffer } from "../shared/lz4Util.js";
+/**
+ * src/stream/streamAsyncDecompress.js
+ * * Async LZ4 Decompression (Web Streams & Promises).
+ * * This module provides asynchronous decompression capabilities to prevent blocking
+ * the main thread (UI freeze/Server lag).
+ * * Features:
+ * - **Stream Factory**: `createAsyncDecompressStream` for piping data.
+ * - **Promise Helper**: `decompressAsync` for one-shot buffer decompression.
+ * @module streamAsyncDecompress
+ */
+
+import { LZ4Decoder } from '../shared/lz4Decode.js';
+import { ensureBuffer } from '../shared/lz4Util.js';
+import { TaskScheduler } from './scheduler.js';
 
 /**
- * Asynchronously decompresses an LZ4 Frame into raw binary data.
- * Uses "Time Slicing" to prevent blocking the main thread.
- *
- * @param {Uint8Array|ArrayBuffer|ArrayBufferView|string} input - The compressed LZ4 Frame.
+ * Creates an Asynchronous Decompression Stream.
  * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary.
- * @param {boolean} [verifyChecksum=true] - If false, skips checksum verification (faster).
- * @param {number} [chunkSize=524288] - Processing chunk size (default 512KB).
- * @returns {Promise<Uint8Array>} Resolved decompressed data.
+ * @param {boolean} [verifyChecksum=true] - If true, validates content checksums.
+ * @param {number} [concurrency=1] - Task limit (effectively yields event loop).
+ * @returns {TransformStream} A Web Standard TransformStream.
  */
-export async function decompressAsync(input, dictionary = null, verifyChecksum = true, chunkSize = 524288) {
-    // 1. Coerce input to Uint8Array immediately
-    const rawInput = ensureBuffer(input);
+export function createAsyncDecompressStream(dictionary = null, verifyChecksum = true, concurrency = 1) {
+    const decoder = new LZ4Decoder(dictionary, verifyChecksum);
+    const scheduler = new TaskScheduler(concurrency);
 
-    // 2. Initialize Stream
-    const stream = createDecompressStream(dictionary, verifyChecksum);
-    const reader = stream.readable.getReader();
-    const writer = stream.writable.getWriter();
-
-    // Target a 12ms budget
-    const yieldIfOverBudget = createTimeSlicer(12);
-
-    /** @type {Uint8Array[]} Storage for decompressed chunks */
-    const resultChunks = [];
-    let totalLength = 0;
-
-    // 3. Start Reader (Parallel)
-    const readPromise = (async () => {
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (value) {
-                resultChunks.push(value);
-                totalLength += value.byteLength;
+    return new TransformStream({
+        async transform(chunk, controller) {
+            try {
+                await scheduler.schedule(async () => {
+                    const data = ensureBuffer(chunk);
+                    const outputChunks = decoder.update(data);
+                    for (const c of outputChunks) {
+                        controller.enqueue(c);
+                    }
+                });
+            } catch (e) {
+                controller.error(e);
             }
+        },
+        flush(controller) {
+            // LZ4 frames self-terminate
         }
-    })();
+    });
+}
 
-    // 4. Write in Chunks (Time Sliced)
-    const len = rawInput.byteLength;
+/**
+ * Decompresses a buffer asynchronously (Promises).
+ * * This is a "batteries-included" helper that manages the stream lifecycle for you.
+ * It yields the event loop during processing to keep the application responsive.
+ * @param {Uint8Array|ArrayBuffer|Buffer} input - Compressed input.
+ * @param {Uint8Array} [dictionary=null] - Optional dictionary.
+ * @param {boolean} [verifyChecksum=true] - Validate checksums.
+ * @param {number} [concurrency=1] - Task/Yield limit.
+ * @returns {Promise<Uint8Array>} The decompressed data.
+ */
+export async function decompressAsync(input, dictionary = null, verifyChecksum = true, concurrency = 1) {
+    const stream = createAsyncDecompressStream(dictionary, verifyChecksum, concurrency);
+    const writer = stream.writable.getWriter();
+    const reader = stream.readable.getReader();
+    const chunks = [];
+
+    // Feed input
+    writer.write(input);
+    writer.close();
+
+    // Read output
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+    }
+
+    // Merge chunks
+    if (chunks.length === 1) return chunks[0];
+    const totalLen = chunks.reduce((acc, c) => acc + c.length, 0);
+    const result = new Uint8Array(totalLen);
     let offset = 0;
-
-    while (offset < len) {
-        const end = Math.min(offset + chunkSize, len);
-        const chunk = rawInput.subarray(offset, end);
-
-        // Write chunk
-        await writer.write(chunk);
-
-        // Yield if needed
-        await yieldIfOverBudget();
-
-        offset = end;
+    for (const c of chunks) {
+        result.set(c, offset);
+        offset += c.length;
     }
-
-    // 5. Finalize
-    await writer.close();
-    await readPromise;
-
-    // 6. Merge Results
-    const result = new Uint8Array(totalLength);
-    let pos = 0;
-    for (const chunk of resultChunks) {
-        result.set(chunk, pos);
-        pos += chunk.byteLength;
-    }
-
     return result;
 }

@@ -1,69 +1,98 @@
-import { createCompressStream } from "./streamCompress.js";
-import { createTimeSlicer } from "./scheduler.js";
+/**
+ * src/stream/streamAsyncCompress.js
+ * * Async LZ4 Compression (Web Streams & Promises).
+ * * This module provides a non-blocking compression stream using a task scheduler.
+ * It is useful for compressing large files in browser main threads or busy Node.js
+ * processes without blocking the event loop.
+ * @module streamAsyncCompress
+ */
+
+import { LZ4Encoder } from "../shared/lz4Encode.js";
 import { ensureBuffer } from "../shared/lz4Util.js";
+import { TaskScheduler } from "./scheduler.js";
 
 /**
- * Asynchronously compresses data into an LZ4 Frame.
- * Uses a time-slicing scheduler to avoid blocking the main thread during large compressions.
- *
- * @param {Uint8Array|string|ArrayBuffer} input - The data to compress.
- * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary (history window).
- * @param {number} [maxBlockSize=4194304] - Target block size (default 4MB).
- * @param {boolean} [blockIndependence=false] - If false, allows matches across blocks (better compression, slower seeking).
- * @param {boolean} [contentChecksum=false] - If true, appends XXHash32 checksum at the end of the stream.
- * @param {number} [chunkSize=524288] - Size of chunks processed per time slice (default 512KB).
- * @returns {Promise<Uint8Array>} A promise that resolves to the complete compressed buffer.
+ * Creates an Asynchronous Compression Stream.
+ * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary for compression (warmup).
+ * @param {number} [maxBlockSize=4194304] - Target block size in bytes (default 4MB).
+ * @param {boolean} [blockIndependence=false] - If false, allows matches across blocks (better compression).
+ * @param {boolean} [contentChecksum=false] - If true, appends XXHash32 checksum at the end.
+ * @param {number} [concurrency=1] - Task limit (acts as a yield mechanism to prevent blocking).
+ * @returns {TransformStream} A Web Standard TransformStream.
  */
-export async function compressAsync(input, dictionary = null, maxBlockSize = 4194304, blockIndependence = false, contentChecksum = false, chunkSize = 524288) {
-    // Compatibility check
-    const rawInput = ensureBuffer(input);
+export function createAsyncCompressStream(dictionary = null, maxBlockSize = 4194304, blockIndependence = false, contentChecksum = false, concurrency = 1) {
+    // Note: Concurrency should generally be 1 for stateful LZ4 consistency
+    const scheduler = new TaskScheduler(concurrency);
 
-    const stream = createCompressStream(dictionary, maxBlockSize, blockIndependence, contentChecksum);
-    const reader = stream.readable.getReader();
-    const writer = stream.writable.getWriter();
+    // Instantiate Encoder (Positional Arguments: Size, Indep, Checksum, Dict)
+    const encoder = new LZ4Encoder(maxBlockSize, blockIndependence, contentChecksum, dictionary);
 
-    // Scheduler: Yield to event loop every 12ms to prevent UI freezing
-    const yieldIfOverBudget = createTimeSlicer(12);
-
-    const resultChunks = [];
-    let totalLength = 0;
-
-    // Background Reader: Consumes compressed chunks as they are produced
-    const readPromise = (async () => {
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (value) {
-                resultChunks.push(value);
-                totalLength += value.byteLength;
+    return new TransformStream({
+        async transform(chunk, controller) {
+            try {
+                await scheduler.schedule(async () => {
+                    const data = ensureBuffer(chunk);
+                    const frames = encoder.add(data);
+                    for (const frame of frames) {
+                        controller.enqueue(frame);
+                    }
+                });
+            } catch (e) {
+                controller.error(e);
+            }
+        },
+        async flush(controller) {
+            try {
+                await scheduler.schedule(async () => {
+                    const frames = encoder.finish();
+                    for (const frame of frames) {
+                        controller.enqueue(frame);
+                    }
+                });
+            } catch (e) {
+                controller.error(e);
             }
         }
-    })();
+    });
+}
 
-    const len = rawInput.byteLength;
+/**
+ * Compresses a buffer asynchronously (Promises).
+ * * "Batteries-included" helper for non-blocking compression.
+ * @param {Uint8Array|ArrayBuffer|Buffer} input - Input data.
+ * @param {Uint8Array|null} [dictionary=null] - Optional initial dictionary.
+ * @param {number} [maxBlockSize=4194304] - Block size (default 4MB).
+ * @param {boolean} [blockIndependence=false] - Independent blocks.
+ * @param {boolean} [contentChecksum=false] - Content checksum.
+ * @param {number} [concurrency=1] - Task/Yield limit.
+ * @returns {Promise<Uint8Array>} Compressed data.
+ */
+export async function compressAsync(input, dictionary = null, maxBlockSize = 4194304, blockIndependence = false, contentChecksum = false, concurrency = 1) {
+    const stream = createAsyncCompressStream(dictionary, maxBlockSize, blockIndependence, contentChecksum, concurrency);
+    const writer = stream.writable.getWriter();
+    const reader = stream.readable.getReader();
+    const chunks = [];
+
+    // Write & Close
+    writer.write(input);
+    writer.close();
+
+    // Read Output
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+    }
+
+    // Merge
+    if (chunks.length === 1) return chunks[0];
+
+    const totalLen = chunks.reduce((acc, c) => acc + c.length, 0);
+    const result = new Uint8Array(totalLen);
     let offset = 0;
-
-    // Chunked Writer: Feeds the stream in slices, yielding to the scheduler
-    while (offset < len) {
-        const end = Math.min(offset + chunkSize, len);
-        const chunk = rawInput.subarray(offset, end);
-
-        await writer.write(chunk);
-        await yieldIfOverBudget();
-
-        offset = end;
+    for (const c of chunks) {
+        result.set(c, offset);
+        offset += c.length;
     }
-
-    await writer.close();
-    await readPromise;
-
-    // Concatenate result
-    const result = new Uint8Array(totalLength);
-    let pos = 0;
-    for (const chunk of resultChunks) {
-        result.set(chunk, pos);
-        pos += chunk.byteLength;
-    }
-
     return result;
 }

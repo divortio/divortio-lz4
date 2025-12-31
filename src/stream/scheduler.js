@@ -1,52 +1,42 @@
 /**
- * src/stream/scheduler.js
- *
- * A high-performance utility for managing event loop yielding in CPU-bound tasks.
- * Abstracts setImmediate, scheduler.postTask, and setTimeout.
- *
- * @module stream/scheduler
+ * src/scheduler/scheduler.js
+ * * Task Scheduler.
+ * * A simple concurrency limiter (Semaphore) to manage async task execution.
+ * * It ensures that no more than `concurrency` tasks are running at the same time.
+ * Pending tasks are queued and executed FIFO as slots become available.
+ * @module scheduler
  */
 
-// --- Environment Detection ---
+export class TaskScheduler {
+    /**
+     * Creates a TaskScheduler.
+     * @param {number} concurrency - Maximum number of concurrent tasks (default 1).
+     */
+    constructor(concurrency = 1) {
+        this.concurrency = concurrency;
+        this.running = 0;
+        this.queue = [];
+    }
 
-const isNode = typeof process !== 'undefined' &&
-    process.versions != null &&
-    process.versions.node != null;
-
-const isSchedulerAvailable = typeof scheduler !== 'undefined' &&
-    typeof scheduler.postTask === 'function';
-
-// Polyfill for performance.now()
-const now = (typeof performance !== 'undefined' && performance.now)
-    ? () => performance.now()
-    : () => Date.now();
-
-// --- Yield Primitives ---
-
-/**
- * Yields execution control back to the event loop.
- * Priority: setImmediate (Node) > postTask (Browser) > setTimeout (Fallback)
- * @returns {Promise<void>}
- */
-const yieldControl = isNode
-    ? () => new Promise(resolve => setImmediate(resolve))
-    : isSchedulerAvailable
-        ? () => scheduler.postTask(() => {}, { priority: 'user-visible' })
-        : () => new Promise(resolve => setTimeout(resolve, 0));
-
-/**
- * Creates a "Time Slicer" function that enforces a strict time budget.
- *
- * @param {number} [budgetMs=8] - The time budget in milliseconds.
- * @returns {function(): Promise<void>} An async function to await inside tight loops.
- */
-export function createTimeSlicer(budgetMs = 8) {
-    let start = now();
-
-    return async function checkYield() {
-        if ((now() - start) >= budgetMs) {
-            await yieldControl();
-            start = now(); // Reset clock
+    /**
+     * Schedules a task for execution.
+     * @param {Function} task - An async function to execute.
+     * @returns {Promise<any>} A promise that resolves with the task's result.
+     */
+    async schedule(task) {
+        if (this.running >= this.concurrency) {
+            await new Promise(resolve => this.queue.push(resolve));
         }
-    };
+
+        this.running++;
+        try {
+            return await task();
+        } finally {
+            this.running--;
+            if (this.queue.length > 0) {
+                const next = this.queue.shift();
+                next();
+            }
+        }
+    }
 }

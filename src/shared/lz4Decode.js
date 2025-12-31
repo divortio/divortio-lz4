@@ -10,7 +10,7 @@
 
 import { XXHash32 } from "../xxhash32/xxhash32Stateful.js";
 import { decompressBlock } from "../block/blockDecompress.js";
-import { ensureBuffer } from "../shared/lz4Util.js";
+import { ensureBuffer } from "./lz4Util.js";
 
 // --- Localized Constants for V8 Optimization ---
 // Defining these locally allows TurboFan to treat them as immediate operands.
