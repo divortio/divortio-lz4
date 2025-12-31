@@ -4,18 +4,34 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// CLI Arguments: node bench-worker.js <libName> <sizeMB> <mode>
-const [,, libName, sizeStr, mode] = process.argv;
-const sizeMB = parseFloat(sizeStr);
+// CLI Arguments: node bench-worker.js <libName> <sizeMB|file:path> <mode>
+const [,, libName, inputArg, mode] = process.argv;
 const isDecompress = mode === 'decompress';
 
-if (!libName || !sizeMB || !mode) {
-    console.error("Usage: node bench-worker.js <libName> <sizeMB> <compress|decompress>");
+if (!libName || !inputArg || !mode) {
+    console.error("Usage: node bench-worker.js <libName> <sizeMB|file:path> <compress|decompress>");
     process.exit(1);
 }
 
-// 1. Generate Input Data
-const rawData = Buffer.from(generateData(sizeMB));
+// 1. Prepare Input Data
+let rawData;
+
+if (inputArg.startsWith('file:')) {
+    const filePath = inputArg.slice(5);
+    if (!fs.existsSync(filePath)) {
+        console.error(`File not found: ${filePath}`);
+        process.exit(1);
+    }
+    rawData = fs.readFileSync(filePath);
+} else {
+    const sizeMB = parseFloat(inputArg);
+    rawData = Buffer.from(generateData(sizeMB));
+}
+
+// 2. Pre-allocate Output Buffer (Shared)
+// Worst case LZ4 is input + 0.4% + header + footer. We give a generous margin.
+const MAX_OUTPUT_SIZE = rawData.length + (rawData.length / 255 | 0) + 1024;
+const sharedOutput = new Uint8Array(MAX_OUTPUT_SIZE);
 
 async function runBenchmark() {
     let runFn;
@@ -32,8 +48,10 @@ async function runBenchmark() {
                 decompressBuffer(setupData); // Warmup
                 runFn = () => decompressBuffer(setupData);
             } else {
-                LZ4.compress(rawData, null, 4194304, true, false); // Warmup
-                runFn = () => LZ4.compress(rawData, null, 4194304, true, false);
+                // Zero-Allocation Mode for Benchmark
+                // compress(input, dict, blockSize, blockIndep, checksum, addSize, OUTPUT_BUFFER)
+                LZ4.compress(rawData, null, 4194304, true, false, true, sharedOutput); // Warmup
+                runFn = () => LZ4.compress(rawData, null, 4194304, true, false, true, sharedOutput);
             }
             break;
         }
@@ -50,7 +68,6 @@ async function runBenchmark() {
             break;
         }
         case 'lz4-wasm': {
-            // "lz4-wasm-nodejs" (Optimized for Node)
             const { compress, decompress } = await import('lz4-wasm-nodejs');
             if (isDecompress) {
                 setupData = compress(rawData);
@@ -122,11 +139,8 @@ async function runBenchmark() {
         }
         case 'lz4-browser': {
             const mod = await import('lz4-browser');
-            // Named exports 'encode' and 'decode'
             const encode = mod.encode;
             const decode = mod.decode;
-
-            if (!encode || !decode) throw new Error("Could not find lz4-browser encode/decode methods");
 
             if (isDecompress) {
                 setupData = encode(rawData);
@@ -201,7 +215,6 @@ function getDisplayName(key) {
 }
 
 runBenchmark().catch(err => {
-    // Force error output to stderr
     console.error(err);
     process.exit(1);
 });
