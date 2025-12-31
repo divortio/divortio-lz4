@@ -12,7 +12,7 @@ const HASH_MASK = 16383 | 0;
 const LZ4_VERSION = 1;
 const FLG_BLOCK_INDEPENDENCE_MASK = 0x20;
 const FLG_CONTENT_CHECKSUM_MASK = 0x04;
-const FLG_CONTENT_SIZE_MASK = 0x08; // Added Flag
+const FLG_CONTENT_SIZE_MASK = 0x08;
 const FLG_DICT_ID_MASK = 0x01;
 
 const BLOCK_MAX_SIZES = {
@@ -22,6 +22,7 @@ const BLOCK_MAX_SIZES = {
     7: 4194304
 };
 
+// Fixed 16K Int32 Table (Avoids Polymorphism)
 const GLOBAL_HASH_TABLE = new Int32Array(HASH_TABLE_SIZE);
 
 // --- Local Helpers ---
@@ -39,15 +40,6 @@ function getBlockId(bytes) {
     return 7;
 }
 
-/**
- * Compresses a buffer into an LZ4 Frame.
- * @param {Uint8Array} input
- * @param {Uint8Array} dictionary
- * @param {number} maxBlockSize
- * @param {boolean} blockIndependence
- * @param {boolean} contentChecksum
- * @param {boolean} addContentSize - New parameter (Default true for perf)
- */
 export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304, blockIndependence = false, contentChecksum = false, addContentSize = true) {
     const rawInput = ensureBuffer(input);
 
@@ -73,49 +65,31 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
     const bdId = getBlockId(maxBlockSize);
     const resolvedBlockSize = BLOCK_MAX_SIZES[bdId] | 0;
 
-    // Worst case size + Header overhead
-    // Header can be up to 19 bytes (Magic 4 + FLG 1 + BD 1 + Size 8 + Dict 4 + HC 1)
     const worstCaseSize = (19 + len + (len / 255 | 0) + 64 + 8) | 0;
     const output = new Uint8Array(worstCaseSize);
     let outPos = 0 | 0;
 
-    // --- Header Generation (Inlined) ---
-    // Magic Number (0x184D2204) Little Endian
-    output[outPos++] = 0x04;
-    output[outPos++] = 0x22;
-    output[outPos++] = 0x4D;
-    output[outPos++] = 0x18;
+    output[outPos++] = 0x04; output[outPos++] = 0x22; output[outPos++] = 0x4D; output[outPos++] = 0x18;
 
-    // FLG
     let flg = (LZ4_VERSION << 6);
     if (blockIndependence) flg |= FLG_BLOCK_INDEPENDENCE_MASK;
     if (contentChecksum) flg |= FLG_CONTENT_CHECKSUM_MASK;
     if (dictId !== null) flg |= FLG_DICT_ID_MASK;
-    if (addContentSize) flg |= FLG_CONTENT_SIZE_MASK; // Set Size Flag
+    if (addContentSize) flg |= FLG_CONTENT_SIZE_MASK;
     output[outPos++] = flg;
-
-    // BD
     output[outPos++] = (bdId & 0x07) << 4;
 
-    // Content Size (8 Bytes Little Endian)
     const headerStart = 4;
     if (addContentSize) {
-        // Write Low 32 bits
         writeU32(output, len >>> 0, outPos);
         outPos += 4;
-        // Write High 32 bits (Safe for files < 4GB, simple shift for JS numbers)
-        // Note: bitwise ops in JS truncate to 32 bits, so we divide by 2^32
         writeU32(output, (len / 4294967296) | 0, outPos);
         outPos += 4;
     }
-
-    // Dict ID
     if (dictId !== null) {
         writeU32(output, dictId, outPos);
         outPos += 4;
     }
-
-    // Header Checksum
     const headerHash = xxHash32(output.subarray(headerStart, outPos), 0);
     output[outPos++] = (headerHash >>> 8) & 0xFF;
 
@@ -123,6 +97,7 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
     const hashTable = GLOBAL_HASH_TABLE;
     hashTable.fill(0);
 
+    // Dictionary Warming (Preserved Jenkins Hash logic to match blockCompress)
     if (dictLen > 0) {
         const mask = HASH_MASK;
         const shift = HASH_SHIFT;
@@ -152,9 +127,8 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
         const sizePos = outPos;
         outPos = (outPos + 4) | 0;
 
-        const destView = output.subarray(outPos);
-
-        const compSize = compressBlock(workingBuffer, destView, srcPos, blockSize, hashTable);
+        // Optimization: Zero Allocation (Pass output and offset directly)
+        const compSize = compressBlock(workingBuffer, output, srcPos, blockSize, hashTable, outPos);
 
         if (compSize > 0 && compSize < blockSize) {
             writeU32(output, compSize, sizePos);

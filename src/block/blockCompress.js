@@ -1,27 +1,28 @@
 /**
  * src/block/blockCompress.js
  * LZ4 Block Compression Kernel.
- * Optimized for V8 JIT (Inlined Hash & Local Constants).
- * PEAK PERFORMANCE: ~880+ MB/s
+ * Optimized for V8 JIT.
+ * * CHANGES vs Baseline:
+ * - Added `outputOffset` for Zero-Allocation (Direct Write).
+ * - Upgraded Literal Copy to "Double Copy / 8-Byte Unroll".
+ * - Preserved Static 16K Hash Table (No Polymorphism).
  */
 
-// NOTE: We define constants LOCALLY here to ensure the JIT compiler
-// performs aggressive "Constant Folding" without cross-module overhead.
 const MIN_MATCH = 4 | 0;
 const LAST_LITERALS = 5 | 0;
-const MF_LIMIT = 12 | 0;      // LAST_LITERALS + 7
-const HASH_LOG = 14 | 0;      // L1 Cache Optimized
-const HASH_TABLE_SIZE = 16384 | 0; // 1 << HASH_LOG
-const HASH_SHIFT = 18 | 0;    // 32 - HASH_LOG
-const HASH_MASK = 16383 | 0;  // HASH_TABLE_SIZE - 1
+const MF_LIMIT = 12 | 0;
+const HASH_LOG = 14 | 0;
+const HASH_TABLE_SIZE = 16384 | 0;
+const HASH_SHIFT = 18 | 0;
+const HASH_MASK = 16383 | 0;
 
-export function compressBlock(src, output, srcStart, srcLen, hashTable) {
+export function compressBlock(src, output, srcStart, srcLen, hashTable, outputOffset) {
     var sIndex = srcStart | 0;
     var sEnd = (srcStart + srcLen) | 0;
     var mflimit = (sEnd - MF_LIMIT) | 0;
     var matchLimit = (sEnd - LAST_LITERALS) | 0;
 
-    var dIndex = 0 | 0;
+    var dIndex = outputOffset | 0; // Write directly to offset
     var mAnchor = sIndex;
 
     var searchMatchCount = (1 << 6) + 3;
@@ -37,7 +38,7 @@ export function compressBlock(src, output, srcStart, srcLen, hashTable) {
         // 1. Read Sequence
         seq = (src[sIndex] | (src[sIndex + 1] << 8) | (src[sIndex + 2] << 16) | (src[sIndex + 3] << 24)) | 0;
 
-        // 2. Hash (Bob Jenkins Inlined)
+        // 2. Hash (Bob Jenkins - Preserved)
         h = seq;
         h = (h + 2127912214 + (h << 12)) | 0;
         h = (h ^ -949894596 ^ (h >>> 19)) | 0;
@@ -46,7 +47,6 @@ export function compressBlock(src, output, srcStart, srcLen, hashTable) {
         h = (h + -42973499 + (h << 3)) | 0;
         h = (h ^ -1252372727 ^ (h >>> 16)) | 0;
 
-        // Constant folded: (h >>> 18) & 16383
         hash = (h >>> HASH_SHIFT) & HASH_MASK;
 
         // 3. Lookup
@@ -81,17 +81,44 @@ export function compressBlock(src, output, srcStart, srcLen, hashTable) {
             output[tokenPos] = (litLen << 4);
         }
 
-        // Unrolled Literal Copy
-        var litEnd = (dIndex + litLen) | 0;
-        var i = mAnchor;
-        while (dIndex < (litEnd - 3)) {
-            output[dIndex++] = src[i++];
-            output[dIndex++] = src[i++];
-            output[dIndex++] = src[i++];
-            output[dIndex++] = src[i++];
-        }
-        while (dIndex < litEnd) {
-            output[dIndex++] = src[i++];
+        // OPTIMIZATION: Double Copy / Unrolled Literals
+        if (litLen > 0) {
+            var litSrc = mAnchor;
+            if (litLen >= 8) {
+                var litEnd = (dIndex + litLen) | 0;
+
+                if (litLen > 32) {
+                    output.set(src.subarray(litSrc, litSrc + litLen), dIndex);
+                    dIndex = litEnd;
+                } else {
+                    // Unrolled 8
+                    var litLoopEnd = (litEnd - 8) | 0;
+                    while (dIndex < litLoopEnd) {
+                        output[dIndex++] = src[litSrc++];
+                        output[dIndex++] = src[litSrc++];
+                        output[dIndex++] = src[litSrc++];
+                        output[dIndex++] = src[litSrc++];
+                        output[dIndex++] = src[litSrc++];
+                        output[dIndex++] = src[litSrc++];
+                        output[dIndex++] = src[litSrc++];
+                        output[dIndex++] = src[litSrc++];
+                    }
+                    // Double Copy Tail
+                    var tailOut = (litEnd - 8) | 0;
+                    var tailSrc = (litSrc + (litEnd - dIndex) - 8) | 0;
+                    output[tailOut] = src[tailSrc];
+                    output[tailOut+1] = src[tailSrc+1];
+                    output[tailOut+2] = src[tailSrc+2];
+                    output[tailOut+3] = src[tailSrc+3];
+                    output[tailOut+4] = src[tailSrc+4];
+                    output[tailOut+5] = src[tailSrc+5];
+                    output[tailOut+6] = src[tailSrc+6];
+                    output[tailOut+7] = src[tailSrc+7];
+                    dIndex = litEnd;
+                }
+            } else {
+                while (litLen-- > 0) output[dIndex++] = src[litSrc++];
+            }
         }
 
         // 6. Encode Match Length
@@ -144,17 +171,42 @@ export function compressBlock(src, output, srcStart, srcLen, hashTable) {
         output[tokenPos] = (litLen << 4);
     }
 
-    var litEnd = (dIndex + litLen) | 0;
-    var i = mAnchor;
-    while (dIndex < (litEnd - 3)) {
-        output[dIndex++] = src[i++];
-        output[dIndex++] = src[i++];
-        output[dIndex++] = src[i++];
-        output[dIndex++] = src[i++];
-    }
-    while (dIndex < litEnd) {
-        output[dIndex++] = src[i++];
+    // Copy Final Literals
+    var litSrc = mAnchor;
+    if (litLen > 0) {
+        if (litLen >= 8) {
+            var litEnd = (dIndex + litLen) | 0;
+            if (litLen > 32) {
+                output.set(src.subarray(litSrc, litSrc + litLen), dIndex);
+                dIndex = litEnd;
+            } else {
+                var litLoopEnd = (litEnd - 8) | 0;
+                while (dIndex < litLoopEnd) {
+                    output[dIndex++] = src[litSrc++];
+                    output[dIndex++] = src[litSrc++];
+                    output[dIndex++] = src[litSrc++];
+                    output[dIndex++] = src[litSrc++];
+                    output[dIndex++] = src[litSrc++];
+                    output[dIndex++] = src[litSrc++];
+                    output[dIndex++] = src[litSrc++];
+                    output[dIndex++] = src[litSrc++];
+                }
+                var tailOut = (litEnd - 8) | 0;
+                var tailSrc = (litSrc + (litEnd - dIndex) - 8) | 0;
+                output[tailOut] = src[tailSrc];
+                output[tailOut+1] = src[tailSrc+1];
+                output[tailOut+2] = src[tailSrc+2];
+                output[tailOut+3] = src[tailSrc+3];
+                output[tailOut+4] = src[tailSrc+4];
+                output[tailOut+5] = src[tailSrc+5];
+                output[tailOut+6] = src[tailSrc+6];
+                output[tailOut+7] = src[tailSrc+7];
+                dIndex = litEnd;
+            }
+        } else {
+            while (litLen-- > 0) output[dIndex++] = src[litSrc++];
+        }
     }
 
-    return dIndex | 0;
+    return (dIndex - outputOffset) | 0;
 }
