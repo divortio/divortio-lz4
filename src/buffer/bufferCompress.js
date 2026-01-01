@@ -253,4 +253,7 @@ export function compressBuffer(input, dictionary = null, maxBlockSize = 4194304,
 
     // Return the used portion of the output buffer
     return output.subarray(0, outPos);
+
+
+
 }
