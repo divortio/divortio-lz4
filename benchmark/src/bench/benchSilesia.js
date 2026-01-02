@@ -5,18 +5,18 @@ import { fileURLToPath } from 'node:url';
 import https from 'node:https';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const WORKER_PATH = path.join(__dirname, 'bench-worker.js');
+const WORKER_PATH = path.join(__dirname, 'benchWorker.js');
 const CORPUS_DIR = path.join(__dirname, 'silesia_corpus');
 
 // New URL (tar.gz)
 const CORPUS_URL = 'https://github.com/DataCompression/corpus-collection/raw/refs/heads/main/Silesia-Corpus/silesia.tar.gz';
 
 const LIBRARIES = [
-    'lz4-napi',
-    'lz4-wasm',
-    'lz4-wasm-web',
-    'lz4-browser',
-    'snappy',
+    // 'lz4-napi',
+    // 'lz4-wasm',
+    // 'lz4-wasm-web',
+    // 'lz4-browser',
+    // 'snappy',
     'divortio',
     'lz4js',
     'snappyjs'

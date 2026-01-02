@@ -1,10 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { printResults, printSystemInfo } from './bench-utils.js';
+import { printResults, printSystemInfo } from './benchUtils.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const WORKER_PATH = path.join(__dirname, 'bench-worker.js');
+const WORKER_PATH = path.join(__dirname, 'benchWorker.js');
 
 const LIBRARIES = [
     // 'lz4-napi',

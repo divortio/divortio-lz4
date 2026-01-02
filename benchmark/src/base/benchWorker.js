@@ -1,15 +1,15 @@
-import { generateData, measure } from './bench-utils.js';
+import { generateData, measure } from './benchUtils.js';
 import { Buffer } from 'node:buffer';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// CLI Arguments: node bench-worker.js <libName> <sizeMB|file:path> <mode>
+// CLI Arguments: node benchWorker.js <libName> <sizeMB|file:path> <mode>
 const [,, libName, inputArg, mode] = process.argv;
 const isDecompress = mode === 'decompress';
 
 if (!libName || !inputArg || !mode) {
-    console.error("Usage: node bench-worker.js <libName> <sizeMB|file:path> <compress|decompress>");
+    console.error("Usage: node benchWorker.js <libName> <sizeMB|file:path> <compress|decompress>");
     process.exit(1);
 }
 
@@ -40,8 +40,8 @@ async function runBenchmark() {
     // Dynamic Import & Setup
     switch (libName) {
         case 'divortio': {
-            const { LZ4 } = await import('../src/lz4.js');
-            const { decompressBuffer } = await import('../src/buffer/bufferDecompress.js');
+            const { LZ4 } = await import('../../../src/lz4.js');
+            const { decompressBuffer } = await import('../../../src/buffer/bufferDecompress.js');
 
             if (isDecompress) {
                 setupData = LZ4.compress(rawData, null, 4194304, true, false);

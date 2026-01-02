@@ -130,3 +130,4 @@ divortio-lz4.iml
 benchmark/decompression-1MB.cpuprofile
 benchmark/decompression-1MB.cpuprofile
 /benchmark/.cache/corpus/silesia
+package-lock.json

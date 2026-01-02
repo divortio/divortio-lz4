@@ -1,4 +1,4 @@
-import { printSystemInfo } from './sys-info.js';
+import { printSystemInfo } from './sysInfo.js';
 
 // Re-export for convenience
 export { printSystemInfo };
