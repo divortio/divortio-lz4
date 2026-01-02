@@ -129,4 +129,4 @@ divortio-lz4.iml
 *.cpuprofile
 benchmark/decompression-1MB.cpuprofile
 benchmark/decompression-1MB.cpuprofile
-/benchmark/silesia_corpus
+/benchmark/.cache/corpus/silesia
