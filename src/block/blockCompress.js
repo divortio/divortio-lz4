@@ -93,14 +93,14 @@ export function compressBlock(src, output, srcStart, srcLen, hashTable, outputOf
             var litSrc = mAnchor;
             var litEnd = (dIndex + litLen) | 0;
 
-            // TUNING: Threshold set to 64.
-            // < 64: JS loop is competitive & avoids GC allocation.
-            // > 64: Native set() speed outweighs the GC cost of subarray().
-            if (litLen > 64) {
+            // TUNING: Threshold increased from 64 to 128.
+            // < 128: JS loop is faster (avoids GC allocation of subarray).
+            // > 128: Native set() speed outweighs the GC cost.
+            if (litLen > 128) {
                 output.set(src.subarray(litSrc, litSrc + litLen), dIndex);
                 dIndex = litEnd;
             } else {
-                // Optimized Small Copy Strategy
+                // Optimized Small/Medium Copy Strategy
 
                 // 1. Unroll 8 bytes
                 var litLoopEnd = (litEnd - 8) | 0;
@@ -194,7 +194,8 @@ export function compressBlock(src, output, srcStart, srcLen, hashTable, outputOf
     var litSrc = mAnchor;
     if (litLen > 0) {
         var litEnd = (dIndex + litLen) | 0;
-        if (litLen > 64) {
+        // TUNING: Apply the same threshold (128) to the tail literals
+        if (litLen > 128) {
             output.set(src.subarray(litSrc, litSrc + litLen), dIndex);
             dIndex = litEnd;
         } else {

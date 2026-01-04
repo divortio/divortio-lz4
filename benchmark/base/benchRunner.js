@@ -13,7 +13,7 @@ const LIBRARIES = [
     // 'lz4-browser',  // New (lz4-browser pkg)
     // 'snappy',
     'divortio',
-    'lz4js',
+    // 'lz4js',
     // 'snappyjs'
 ];
 

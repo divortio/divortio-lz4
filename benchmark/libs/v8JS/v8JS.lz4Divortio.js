@@ -40,7 +40,7 @@ export class V8JSLz4Divortio extends BaseLib {
      */
     async load() {
         // Relative path from 'benchmark/libraries/' to 'src/lz4.js'
-        const mod = await import('../../../../src/lz4.js');
+        const mod = await import('../../../src/lz4.js');
 
         this.LZ4 = mod.LZ4;
 
