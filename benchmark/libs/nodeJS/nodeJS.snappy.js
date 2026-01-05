@@ -9,12 +9,12 @@ import { BaseLib } from '../shared/baseLib.js';
  * This wrapper focuses on the synchronous bindings provided by the package to ensure
  * benchmarks measure raw algorithmic performance rather than async overhead.
  *
- * @class NodeSnappy
+ * @class NodeJSSnappy
  * @extends {BaseLib}
  */
-export class NodeSnappy extends BaseLib {
+export class NodeJSSnappy extends BaseLib {
     /**
-     * Creates an instance of the NodeSnappy adapter.
+     * Creates an instance of the NodeJSSnappy adapter.
      */
     constructor() {
         // name: 'snappy' - Semantic name for reports
@@ -57,7 +57,7 @@ export class NodeSnappy extends BaseLib {
      */
     compress(input, outputBuffer) {
         if (!this.snappy) {
-            throw new Error("NodeSnappy is not loaded. Call load() first.");
+            throw new Error("NodeJSSnappy is not loaded. Call load() first.");
         }
         // We use compressSync to avoid the overhead of the libuv thread pool
         // and async promise handling during tight benchmark loops.
@@ -76,11 +76,11 @@ export class NodeSnappy extends BaseLib {
      */
     decompress(input, outputBuffer) {
         if (!this.snappy) {
-            throw new Error("NodeSnappy is not loaded. Call load() first.");
+            throw new Error("NodeJSSnappy is not loaded. Call load() first.");
         }
         // uncompressSync throws if the input data is invalid
         return this.snappy.uncompressSync(input);
     }
 }
 
-export default {NodeSnappy};
+export default {NodeSnappy: NodeJSSnappy};

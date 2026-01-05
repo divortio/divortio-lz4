@@ -1,33 +1,32 @@
 /**
- * @fileoverview Implementation of the Node.js Zlib (Gzip) benchmark adapter.
+ * @fileoverview Implementation of the Node.js Zlib (Deflate) benchmark adapter.
  */
 
 import { BaseLib } from '../shared/baseLib.js';
 import zlib from 'node:zlib';
 
 /**
- * Wrapper for the Node.js native Gzip implementation.
- * Gzip is the standard compression for the web (HTTP), offering a good balance
- * of ratio and speed, though generally slower than LZ4/Snappy.
+ * Wrapper for the Node.js native Deflate implementation.
+ * Deflate is the underlying algorithm for Gzip and Zip. It provides raw
+ * DEFLATE streams (zlib format), usually slightly smaller than Gzip
+ * because it lacks the Gzip header/footer.
  *
- * @class NodeZlibGzip
+ * @class NodeJSZlibDeflate
  * @extends {BaseLib}
  */
-export class NodeZlibGzip extends BaseLib {
+export class NodeJSZlibDeflate extends BaseLib {
     constructor() {
-        super('node-gzip', 'node:zlib', 'NodeJS', 'C++');
+        super('node-deflate', 'node:zlib', 'NodeJS', 'C++');
     }
 
     async load() {
-        // node:zlib is built-in, no loading required.
-        // We verify the sync methods exist just in case.
-        if (!zlib.gzipSync || !zlib.gunzipSync) {
+        if (!zlib.deflateSync || !zlib.inflateSync) {
             throw new Error("Node.js zlib module missing sync methods.");
         }
     }
 
     /**
-     * Compresses data using Node.js Gzip.
+     * Compresses data using Node.js Deflate.
      *
      * @override
      * @param {Uint8Array|Buffer} input - The raw input data.
@@ -36,12 +35,11 @@ export class NodeZlibGzip extends BaseLib {
      * @returns {Uint8Array|Buffer} The compressed data.
      */
     compress(input, outputBuffer) {
-        // gzipSync(buffer, [options])
-        return zlib.gzipSync(input);
+        return zlib.deflateSync(input);
     }
 
     /**
-     * Decompresses data using Node.js Gunzip.
+     * Decompresses data using Node.js Inflate.
      *
      * @override
      * @param {Uint8Array|Buffer} compressedInput - The compressed data.
@@ -50,7 +48,6 @@ export class NodeZlibGzip extends BaseLib {
      * @returns {Uint8Array|Buffer} The decompressed data.
      */
     decompress(compressedInput, outputBuffer) {
-        // gunzipSync(buffer, [options])
-        return zlib.gunzipSync(compressedInput);
+        return zlib.inflateSync(compressedInput);
     }
 }

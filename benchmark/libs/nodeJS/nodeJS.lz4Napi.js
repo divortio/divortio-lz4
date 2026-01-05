@@ -11,12 +11,12 @@ import { BaseLib } from '../shared/baseLib.js';
  * with a native LZ4 implementation. It is backed by Rust (via napi-rs and lz4-flex),
  * providing native performance with memory safety.
  *
- * @class NodeLz4Napi
+ * @class NodeJSLz4Napi
  * @extends {BaseLib}
  */
-export class NodeLz4Napi extends BaseLib {
+export class NodeJSLz4Napi extends BaseLib {
     /**
-     * Creates an instance of the NodeLz4Napi adapter.
+     * Creates an instance of the NodeJSLz4Napi adapter.
      * Sets up the metadata for the benchmark runner.
      */
     constructor() {

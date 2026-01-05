@@ -1,32 +1,32 @@
 /**
- * @fileoverview Implementation of the Node.js Zlib (Deflate) benchmark adapter.
+ * @fileoverview Implementation of the Node.js Zlib (Brotli) benchmark adapter.
  */
 
 import { BaseLib } from '../shared/baseLib.js';
 import zlib from 'node:zlib';
 
 /**
- * Wrapper for the Node.js native Deflate implementation.
- * Deflate is the underlying algorithm for Gzip and Zip. It provides raw
- * DEFLATE streams (zlib format), usually slightly smaller than Gzip
- * because it lacks the Gzip header/footer.
+ * Wrapper for the Node.js native Brotli implementation.
+ * Brotli is a modern compression algorithm (by Google) optimized for the web.
+ * It generally offers better compression ratios than Gzip but can be slower
+ * at high compression levels.
  *
- * @class NodeZlibDeflate
+ * @class NodeJSZlibBrotli
  * @extends {BaseLib}
  */
-export class NodeZlibDeflate extends BaseLib {
+export class NodeJSZlibBrotli extends BaseLib {
     constructor() {
-        super('node-deflate', 'node:zlib', 'NodeJS', 'C++');
+        super('node-brotli', 'node:zlib', 'NodeJS', 'C++');
     }
 
     async load() {
-        if (!zlib.deflateSync || !zlib.inflateSync) {
-            throw new Error("Node.js zlib module missing sync methods.");
+        if (!zlib.brotliCompressSync || !zlib.brotliDecompressSync) {
+            throw new Error("Node.js zlib module missing Brotli support (Node v10.16+ required).");
         }
     }
 
     /**
-     * Compresses data using Node.js Deflate.
+     * Compresses data using Node.js Brotli.
      *
      * @override
      * @param {Uint8Array|Buffer} input - The raw input data.
@@ -35,11 +35,12 @@ export class NodeZlibDeflate extends BaseLib {
      * @returns {Uint8Array|Buffer} The compressed data.
      */
     compress(input, outputBuffer) {
-        return zlib.deflateSync(input);
+        // We use default quality settings (usually quality 11 in Node)
+        return zlib.brotliCompressSync(input);
     }
 
     /**
-     * Decompresses data using Node.js Inflate.
+     * Decompresses data using Node.js Brotli.
      *
      * @override
      * @param {Uint8Array|Buffer} compressedInput - The compressed data.
@@ -48,6 +49,6 @@ export class NodeZlibDeflate extends BaseLib {
      * @returns {Uint8Array|Buffer} The decompressed data.
      */
     decompress(compressedInput, outputBuffer) {
-        return zlib.inflateSync(compressedInput);
+        return zlib.brotliDecompressSync(compressedInput);
     }
 }

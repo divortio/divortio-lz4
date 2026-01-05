@@ -89,4 +89,4 @@ export class V8JSLz4Browser extends BaseLib {
     }
 }
 
-export default V8JSLz4Browser;
+export default {V8JSLz4Browser};

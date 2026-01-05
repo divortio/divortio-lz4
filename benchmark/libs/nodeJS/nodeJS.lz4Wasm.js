@@ -11,12 +11,12 @@ import { BaseLib } from '../shared/baseLib.js';
  * It usually offers better performance than pure JS implementations by running
  * the compression logic in WASM.
  *
- * @class NodeLz4Wasm
+ * @class NodeJSLz4Wasm
  * @extends {BaseLib}
  */
-export class NodeLz4Wasm extends BaseLib {
+export class NodeJSLz4Wasm extends BaseLib {
     /**
-     * Creates an instance of the NodeLz4Wasm adapter.
+     * Creates an instance of the NodeJSLz4Wasm adapter.
      */
     constructor() {
         // name: 'lz4-wasm-node' - Semantic name for reports

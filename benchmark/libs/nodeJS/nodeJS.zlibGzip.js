@@ -1,32 +1,33 @@
 /**
- * @fileoverview Implementation of the Node.js Zlib (Brotli) benchmark adapter.
+ * @fileoverview Implementation of the Node.js Zlib (Gzip) benchmark adapter.
  */
 
 import { BaseLib } from '../shared/baseLib.js';
 import zlib from 'node:zlib';
 
 /**
- * Wrapper for the Node.js native Brotli implementation.
- * Brotli is a modern compression algorithm (by Google) optimized for the web.
- * It generally offers better compression ratios than Gzip but can be slower
- * at high compression levels.
+ * Wrapper for the Node.js native Gzip implementation.
+ * Gzip is the standard compression for the web (HTTP), offering a good balance
+ * of ratio and speed, though generally slower than LZ4/Snappy.
  *
- * @class NodeZlibBrotli
+ * @class NodeJSZlibGzip
  * @extends {BaseLib}
  */
-export class NodeZlibBrotli extends BaseLib {
+export class NodeJSZlibGzip extends BaseLib {
     constructor() {
-        super('node-brotli', 'node:zlib', 'NodeJS', 'C++');
+        super('node-gzip', 'node:zlib', 'NodeJS', 'C++');
     }
 
     async load() {
-        if (!zlib.brotliCompressSync || !zlib.brotliDecompressSync) {
-            throw new Error("Node.js zlib module missing Brotli support (Node v10.16+ required).");
+        // node:zlib is built-in, no loading required.
+        // We verify the sync methods exist just in case.
+        if (!zlib.gzipSync || !zlib.gunzipSync) {
+            throw new Error("Node.js zlib module missing sync methods.");
         }
     }
 
     /**
-     * Compresses data using Node.js Brotli.
+     * Compresses data using Node.js Gzip.
      *
      * @override
      * @param {Uint8Array|Buffer} input - The raw input data.
@@ -35,12 +36,12 @@ export class NodeZlibBrotli extends BaseLib {
      * @returns {Uint8Array|Buffer} The compressed data.
      */
     compress(input, outputBuffer) {
-        // We use default quality settings (usually quality 11 in Node)
-        return zlib.brotliCompressSync(input);
+        // gzipSync(buffer, [options])
+        return zlib.gzipSync(input);
     }
 
     /**
-     * Decompresses data using Node.js Brotli.
+     * Decompresses data using Node.js Gunzip.
      *
      * @override
      * @param {Uint8Array|Buffer} compressedInput - The compressed data.
@@ -49,6 +50,7 @@ export class NodeZlibBrotli extends BaseLib {
      * @returns {Uint8Array|Buffer} The decompressed data.
      */
     decompress(compressedInput, outputBuffer) {
-        return zlib.brotliDecompressSync(compressedInput);
+        // gunzipSync(buffer, [options])
+        return zlib.gunzipSync(compressedInput);
     }
 }
